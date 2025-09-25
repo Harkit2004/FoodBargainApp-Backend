@@ -1,12 +1,14 @@
 {
   "name": "foodbargainapp-backend",
   "version": "1.0.0",
-  "description": "",
-  "main": "dist/index.js",
+  "description": "FoodBargain App Backend API",
+  "main": "dist/src/index.js",
   "scripts": {
-    "start": "tsc && node dist/index.js",
-    "lint": "eslint . --ext .ts",
-    "eslint:fix": "eslint . --ext .ts --fix",
+    "build": "tsc",
+    "start": "npm run build && node dist/src/index.js",
+    "dev": "npm run build && node dist/src/index.js",
+    "lint": "eslint . --ext .ts --ignore-pattern dist/",
+    "lint:fix": "eslint . --ext .ts --ignore-pattern dist/ --fix",
     "prettier": "prettier --write .",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
@@ -31,6 +33,7 @@
     "typescript-eslint": "^8.44.1"
   },
   "dependencies": {
+    "@clerk/backend": "^2.15.0",
     "@neondatabase/serverless": "^1.0.1",
     "dotenv": "^17.2.2",
     "drizzle-orm": "^0.44.5",

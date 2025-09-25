@@ -29,9 +29,9 @@ export const users = pgTable("users", {
   id: uuid("id").primaryKey().defaultRandom(),
   clerkUserId: varchar("clerk_user_id").notNull().unique(),
   email: varchar("email").unique(),
-  displayName: varchar("display_name"),
+  displayName: varchar("display_name").notNull(),
   phone: varchar("phone"),
-  location: varchar("location"),
+  location: varchar("location").notNull(),
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow(),
 });
