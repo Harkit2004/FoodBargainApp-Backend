@@ -141,7 +141,7 @@ export const dealCuisines = pgTable("deal_cuisines", {
   dealId: bigint("deal_id", { mode: "number" })
     .notNull()
     .references(() => deals.id),
-  cuisineId: integer("cuisine_id")
+  cuisineId: bigint("cuisine_id", { mode: "number" })
     .notNull()
     .references(() => cuisines.id),
 });
@@ -152,7 +152,7 @@ export const dealDietaryPreferences = pgTable("deal_dietary_preferences", {
   dealId: bigint("deal_id", { mode: "number" })
     .notNull()
     .references(() => deals.id),
-  dietaryPreferenceId: integer("dietary_preference_id")
+  dietaryPreferenceId: bigint("dietary_preference_id", { mode: "number" })
     .notNull()
     .references(() => dietaryPreferences.id),
 });
@@ -188,7 +188,7 @@ export const userCuisines = pgTable("user_cuisines", {
   userId: uuid("user_id")
     .notNull()
     .references(() => users.id),
-  cuisineId: integer("cuisine_id")
+  cuisineId: bigint("cuisine_id", { mode: "number" })
     .notNull()
     .references(() => cuisines.id),
 });
@@ -199,7 +199,7 @@ export const userDietaryPreferences = pgTable("user_dietary_preferences", {
   userId: uuid("user_id")
     .notNull()
     .references(() => users.id),
-  dietaryPreferenceId: integer("dietary_preference_id")
+  dietaryPreferenceId: bigint("dietary_preference_id", { mode: "number" })
     .notNull()
     .references(() => dietaryPreferences.id),
 });

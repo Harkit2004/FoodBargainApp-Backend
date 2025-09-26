@@ -4,6 +4,7 @@ import menuRoutes from "./menu.js";
 import notificationsRoutes from "./notifications.js";
 import partnerRoutes from "./partner.js";
 import partnerDealsRoutes from "./partner-deals.js";
+import preferencesRoutes from "./preferences.js";
 import ratingsRoutes from "./ratings.js";
 import searchRoutes from "./search.js";
 import userRoutes from "./user.js";
@@ -15,6 +16,7 @@ export {
   notificationsRoutes,
   partnerRoutes,
   partnerDealsRoutes,
+  preferencesRoutes,
   ratingsRoutes,
   searchRoutes,
   userRoutes,
@@ -28,6 +30,7 @@ export default {
   notifications: notificationsRoutes,
   partner: partnerRoutes,
   partnerDeals: partnerDealsRoutes,
+  preferences: preferencesRoutes,
   ratings: ratingsRoutes,
   search: searchRoutes,
   user: userRoutes,

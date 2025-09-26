@@ -7,6 +7,7 @@ import {
   userCuisines,
   userDietaryPreferences,
   userNotificationPreferences,
+  partners,
 } from "../db/schema.js";
 import { eq } from "drizzle-orm";
 import type { AuthenticatedRequest } from "../middleware/auth.js";
@@ -87,68 +88,66 @@ router.post("/register", async (req: Request, res: Response) => {
       });
     }
 
-    // Begin transaction to create user with all preferences
-    const result = await db.transaction(async (tx) => {
-      // Create user record
-      const newUser = await tx
-        .insert(users)
-        .values({
-          clerkUserId,
-          email: clerkUser.emailAddresses[0]?.emailAddress || "",
-          displayName,
-          location,
-          phone: phone || null,
-          createdAt: new Date(),
-          updatedAt: new Date(),
-        })
-        .returning();
-
-      const userId = newUser[0]!.id;
-
-      // Add cuisine preferences
-      if (cuisinePreferences.length > 0) {
-        const cuisineData = cuisinePreferences.map((cuisineId: number) => ({
-          userId,
-          cuisineId,
-        }));
-        await tx.insert(userCuisines).values(cuisineData);
-      }
-
-      // Add dietary preferences
-      if (dietaryPreferences.length > 0) {
-        const dietaryData = dietaryPreferences.map((dietaryPreferenceId: number) => ({
-          userId,
-          dietaryPreferenceId,
-        }));
-        await tx.insert(userDietaryPreferences).values(dietaryData);
-      }
-
-      // Create default notification preferences
-      await tx.insert(userNotificationPreferences).values({
-        userId,
-        emailNotifications: true,
+    // Create user record first
+    const newUser = await db
+      .insert(users)
+      .values({
+        clerkUserId,
+        email: clerkUser.emailAddresses[0]?.emailAddress || "",
+        displayName,
+        location,
+        phone: phone || null,
         createdAt: new Date(),
         updatedAt: new Date(),
-      });
+      })
+      .returning();
 
-      return newUser[0]!;
+    const result = newUser[0]!;
+    const userId = result.id;
+
+    // Add cuisine preferences
+    if (cuisinePreferences.length > 0) {
+      const cuisineData = cuisinePreferences.map((cuisineId: number) => ({
+        userId,
+        cuisineId,
+      }));
+      await db.insert(userCuisines).values(cuisineData);
+    }
+
+    // Add dietary preferences
+    if (dietaryPreferences.length > 0) {
+      const dietaryData = dietaryPreferences.map((dietaryPreferenceId: number) => ({
+        userId,
+        dietaryPreferenceId,
+      }));
+      await db.insert(userDietaryPreferences).values(dietaryData);
+    }
+
+    // Create default notification preferences
+    await db.insert(userNotificationPreferences).values({
+      userId,
+      emailNotifications: true,
+      createdAt: new Date(),
+      updatedAt: new Date(),
     });
 
     res.status(201).json({
       success: true,
       message: "User registration completed successfully",
       data: {
-        id: result.id,
-        email: result.email,
-        displayName: result.displayName,
-        location: result.location,
-        phone: result.phone,
-        clerkUserId: result.clerkUserId,
-        cuisinePreferences: cuisinePreferences.length,
-        dietaryPreferences: dietaryPreferences.length,
+        user: {
+          id: result.id,
+          email: result.email,
+          displayName: result.displayName,
+          location: result.location,
+          phone: result.phone,
+          clerkUserId: result.clerkUserId,
+          isPartner: false, // New users are not partners by default
+        },
       },
     });
-  } catch {
+  } catch (error) {
+    console.error("Registration error:", error);
     res.status(500).json({
       success: false,
       error: "Failed to complete user registration",
@@ -192,6 +191,14 @@ router.post("/login", async (req: Request, res: Response) => {
       });
     }
 
+    // Check if user is a partner
+    const partner = await db
+      .select()
+      .from(partners)
+      .where(eq(partners.userId, user[0]!.id))
+      .limit(1);
+    const isPartner = partner.length > 0;
+
     res.json({
       success: true,
       message: "Login successful",
@@ -201,10 +208,14 @@ router.post("/login", async (req: Request, res: Response) => {
           email: user[0]!.email,
           displayName: user[0]!.displayName,
           clerkUserId: user[0]!.clerkUserId,
+          location: user[0]!.location,
+          phone: user[0]!.phone,
+          isPartner,
         },
       },
     });
-  } catch {
+  } catch (error) {
+    console.error("Login error:", error);
     res.status(500).json({
       success: false,
       error: "Internal server error during login",

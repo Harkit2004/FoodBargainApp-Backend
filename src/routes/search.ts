@@ -9,16 +9,53 @@ import {
   cuisines,
   dealCuisines,
   userFavoriteRestaurants,
+  users,
 } from "../db/schema.js";
 import { ResponseHelper, AuthHelper, ValidationHelper, DbHelper } from "../utils/api-helpers.js";
 
 const router = Router();
 
+// Optional authentication middleware for public endpoints that show user-specific data when logged in
+const optionalAuth = async (req: Request, res: Response, next: () => void) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith("Bearer ")) {
+      // No auth provided, continue as public request
+      return next();
+    }
+
+    const token = authHeader.substring(7); // Remove "Bearer " prefix
+    if (!token) {
+      return next();
+    }
+
+    // Use the same verification logic as the main auth middleware
+    const { verifyToken } = await import("@clerk/backend");
+    const payload = await verifyToken(token, {
+      secretKey: process.env.CLERK_SECRET_KEY!,
+    });
+
+    if (payload && payload.sub) {
+      // Find user in database
+      const user = await db.select().from(users).where(eq(users.clerkUserId, payload.sub)).limit(1);
+
+      if (user.length > 0 && user[0]) {
+        (req as Request & { userId?: string }).userId = user[0].id;
+      }
+    }
+  } catch (error) {
+    // Invalid token, continue as public request
+    console.log("Optional auth failed:", error);
+  }
+
+  next();
+};
+
 /**
  * GET /search/restaurants
  * Search for restaurants with various filters
  */
-router.get("/restaurants", async (req: Request, res: Response) => {
+router.get("/restaurants", optionalAuth, async (req: Request, res: Response) => {
   const {
     q: searchQuery,
     cuisine,
@@ -259,7 +296,25 @@ router.get("/restaurants", async (req: Request, res: Response) => {
           .where(and(sql`${deals.restaurantId} IN ${restaurantIds}`, eq(deals.status, "active")));
       }
 
-      // Map deals to restaurants
+      // Get bookmark status for authenticated users
+      const userId = (req as Request & { userId?: string }).userId;
+      let bookmarkedRestaurants: number[] = [];
+
+      if (userId && restaurantIds.length > 0) {
+        const bookmarks = await db
+          .select({ restaurantId: userFavoriteRestaurants.restaurantId })
+          .from(userFavoriteRestaurants)
+          .where(
+            and(
+              eq(userFavoriteRestaurants.userId, userId),
+              sql`${userFavoriteRestaurants.restaurantId} IN ${restaurantIds}`
+            )
+          );
+
+        bookmarkedRestaurants = bookmarks.map((b) => b.restaurantId);
+      }
+
+      // Map deals and bookmarks to restaurants
       const resultsWithDeals = filteredResults.map((restaurant) => {
         const restaurantDeals = dealsForRestaurants.filter(
           (deal) => deal.restaurantId === restaurant.id
@@ -268,6 +323,7 @@ router.get("/restaurants", async (req: Request, res: Response) => {
         return {
           ...restaurant,
           activeDeals: restaurantDeals,
+          isBookmarked: bookmarkedRestaurants.includes(restaurant.id),
           ...(userLat !== null && userLng !== null && restaurant.latitude && restaurant.longitude
             ? {
                 distance:
@@ -317,7 +373,7 @@ router.get("/restaurants", async (req: Request, res: Response) => {
  * GET /search/restaurants/:restaurantId
  * Get detailed information about a specific restaurant
  */
-router.get("/restaurants/:restaurantId", async (req: Request, res: Response) => {
+router.get("/restaurants/:restaurantId", optionalAuth, async (req: Request, res: Response) => {
   const restaurantId = ValidationHelper.parseId(req.params.restaurantId as string);
   if (restaurantId === null) {
     return ResponseHelper.badRequest(res, "Invalid restaurant ID");
@@ -372,8 +428,30 @@ router.get("/restaurants/:restaurantId", async (req: Request, res: Response) => 
         .where(and(eq(deals.restaurantId, restaurantId), eq(deals.status, "active")))
         .orderBy(deals.createdAt);
 
+      // Get bookmark status for authenticated users
+      const userId = (req as Request & { userId?: string }).userId;
+      let isBookmarked = false;
+
+      if (userId) {
+        const bookmark = await db
+          .select()
+          .from(userFavoriteRestaurants)
+          .where(
+            and(
+              eq(userFavoriteRestaurants.userId, userId),
+              eq(userFavoriteRestaurants.restaurantId, restaurantId)
+            )
+          )
+          .limit(1);
+
+        isBookmarked = bookmark.length > 0;
+      }
+
       return {
-        restaurant: restaurant[0],
+        restaurant: {
+          ...restaurant[0],
+          isBookmarked,
+        },
         activeDeals,
       };
     },

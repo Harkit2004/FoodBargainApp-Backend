@@ -174,6 +174,27 @@ export class AuthHelper {
     // Try to get user from authenticated request, return null if not authenticated
     return req.user?.id || null;
   }
+
+  static async getOptionalAuthFromToken(req: AuthenticatedRequest): Promise<string | null> {
+    try {
+      const authHeader = req.headers.authorization;
+      if (!authHeader || !authHeader.startsWith("Bearer ")) {
+        return null;
+      }
+
+      const token = authHeader.substring(7);
+      if (!token || token === "undefined" || token === "null") {
+        return null;
+      }
+
+      // We need to verify the token and get the user ID
+      // For now, let's use a simplified approach that manually authenticates
+      return null; // TODO: Implement token verification
+    } catch (error) {
+      console.log("Error in getOptionalAuthFromToken:", error);
+      return null;
+    }
+  }
 }
 
 // Database helpers

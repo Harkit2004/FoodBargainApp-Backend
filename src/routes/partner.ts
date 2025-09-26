@@ -1,8 +1,8 @@
 import { Router } from "express";
 import type { Response } from "express";
 import { db } from "../db/db.js";
-import { partners, restaurants } from "../db/schema.js";
-import { eq } from "drizzle-orm";
+import { partners, restaurants, deals } from "../db/schema.js";
+import { eq, and, count } from "drizzle-orm";
 import type { AuthenticatedRequest } from "../middleware/auth.js";
 import { authenticateUser, requirePartner } from "../middleware/auth.js";
 import { AuthHelper, DbHelper, ResponseHelper, ValidationHelper } from "../utils/api-helpers.js";
@@ -303,7 +303,7 @@ router.post("/restaurants", requirePartner, async (req: AuthenticatedRequest, re
 
 /**
  * GET /partner/restaurants
- * Get all restaurants owned by the partner
+ * Get all restaurants owned by the partner with deal counts
  */
 router.get("/restaurants", requirePartner, async (req: AuthenticatedRequest, res: Response) => {
   const userId = AuthHelper.requireAuth(req, res);
@@ -329,7 +329,34 @@ router.get("/restaurants", requirePartner, async (req: AuthenticatedRequest, res
         .from(restaurants)
         .where(eq(restaurants.partnerId, partnerId));
 
-      return partnerRestaurants;
+      // Enhance each restaurant with deal counts
+      const restaurantsWithCounts = await Promise.all(
+        partnerRestaurants.map(async (restaurant) => {
+          // Get total deal count for this restaurant
+          const totalDealsResult = await db
+            .select({ count: count() })
+            .from(deals)
+            .where(eq(deals.restaurantId, restaurant.id));
+
+          // Get active deal count for this restaurant
+          const activeDealsResult = await db
+            .select({ count: count() })
+            .from(deals)
+            .where(and(eq(deals.restaurantId, restaurant.id), eq(deals.status, "active")));
+
+          const totalDeals = totalDealsResult[0]?.count || 0;
+          const activeDeals = activeDealsResult[0]?.count || 0;
+
+          return {
+            ...restaurant,
+            totalDeals: Number(totalDeals),
+            activeDeals: Number(activeDeals),
+            rating: Number(restaurant.ratingAvg || 0),
+          };
+        })
+      );
+
+      return restaurantsWithCounts;
     },
     res,
     "Failed to fetch restaurants"
@@ -339,6 +366,63 @@ router.get("/restaurants", requirePartner, async (req: AuthenticatedRequest, res
     ResponseHelper.success(res, result);
   }
 });
+
+/**
+ * GET /partner/restaurants/:restaurantId
+ * Get a specific restaurant owned by the partner
+ */
+router.get(
+  "/restaurants/:restaurantId",
+  requirePartner,
+  async (req: AuthenticatedRequest, res: Response) => {
+    const userId = AuthHelper.requireAuth(req, res);
+    if (!userId) return;
+
+    const restaurantId = ValidationHelper.parseId(req.params.restaurantId as string);
+    if (restaurantId === null) {
+      return ResponseHelper.badRequest(res, "Invalid restaurant ID");
+    }
+
+    const result = await DbHelper.executeWithErrorHandling(
+      async () => {
+        // Get partner ID
+        const partner = await db
+          .select()
+          .from(partners)
+          .where(eq(partners.userId, userId))
+          .limit(1);
+
+        if (partner.length === 0) {
+          throw new Error("Partner not found");
+        }
+
+        const partnerId = partner[0]?.id;
+        if (!partnerId) {
+          throw new Error("Partner not found");
+        }
+
+        // Get the specific restaurant for this partner
+        const restaurant = await db
+          .select()
+          .from(restaurants)
+          .where(and(eq(restaurants.id, restaurantId), eq(restaurants.partnerId, partnerId)))
+          .limit(1);
+
+        if (restaurant.length === 0) {
+          throw new Error("Restaurant not found or you don't have permission to access it");
+        }
+
+        return restaurant[0];
+      },
+      res,
+      "Failed to fetch restaurant"
+    );
+
+    if (result) {
+      ResponseHelper.success(res, result);
+    }
+  }
+);
 
 /**
  * PUT /partner/restaurants/:restaurantId

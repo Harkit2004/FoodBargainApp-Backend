@@ -9,99 +9,104 @@ import { ResponseHelper, AuthHelper, ValidationHelper, DbHelper } from "../utils
 
 const router = Router();
 
-// Apply authentication middleware to all routes
-router.use(authenticateUser);
-
 /**
  * POST /deals/:dealId/favorite
  * Bookmark/save a deal as favorite
  */
-router.post("/:dealId/favorite", async (req: AuthenticatedRequest, res: Response) => {
-  const userId = AuthHelper.requireAuth(req, res);
-  if (!userId) return;
+router.post(
+  "/:dealId/favorite",
+  authenticateUser,
+  async (req: AuthenticatedRequest, res: Response) => {
+    const userId = AuthHelper.requireAuth(req, res);
+    if (!userId) return;
 
-  const dealId = ValidationHelper.parseId(req.params.dealId as string);
-  if (dealId === null) {
-    return ResponseHelper.badRequest(res, "Invalid deal ID");
+    const dealId = ValidationHelper.parseId(req.params.dealId as string);
+    if (dealId === null) {
+      return ResponseHelper.badRequest(res, "Invalid deal ID");
+    }
+
+    const result = await DbHelper.executeWithErrorHandling(
+      async () => {
+        // Check if deal exists and is active
+        const deal = await db.select().from(deals).where(eq(deals.id, dealId)).limit(1);
+
+        if (deal.length === 0) {
+          throw new Error("Deal not found");
+        }
+
+        if (!deal[0] || deal[0].status !== "active") {
+          throw new Error("Deal is not currently active");
+        }
+
+        // Check if already bookmarked
+        const existingFavorite = await db
+          .select()
+          .from(userFavoriteDeals)
+          .where(and(eq(userFavoriteDeals.userId, userId), eq(userFavoriteDeals.dealId, dealId)))
+          .limit(1);
+
+        if (existingFavorite.length > 0) {
+          throw new Error("Deal is already bookmarked");
+        }
+
+        // Add to favorites
+        await db.insert(userFavoriteDeals).values({
+          userId,
+          dealId,
+        });
+
+        return {
+          dealId,
+          bookmarked: true,
+        };
+      },
+      res,
+      "Failed to bookmark deal"
+    );
+
+    if (result) {
+      ResponseHelper.success(res, result, "Deal bookmarked successfully", 201);
+    }
   }
-
-  const result = await DbHelper.executeWithErrorHandling(
-    async () => {
-      // Check if deal exists and is active
-      const deal = await db.select().from(deals).where(eq(deals.id, dealId)).limit(1);
-
-      if (deal.length === 0) {
-        throw new Error("Deal not found");
-      }
-
-      if (!deal[0] || deal[0].status !== "active") {
-        throw new Error("Deal is not currently active");
-      }
-
-      // Check if already bookmarked
-      const existingFavorite = await db
-        .select()
-        .from(userFavoriteDeals)
-        .where(and(eq(userFavoriteDeals.userId, userId), eq(userFavoriteDeals.dealId, dealId)))
-        .limit(1);
-
-      if (existingFavorite.length > 0) {
-        throw new Error("Deal is already bookmarked");
-      }
-
-      // Add to favorites
-      await db.insert(userFavoriteDeals).values({
-        userId,
-        dealId,
-      });
-
-      return {
-        dealId,
-        bookmarked: true,
-      };
-    },
-    res,
-    "Failed to bookmark deal"
-  );
-
-  if (result) {
-    ResponseHelper.success(res, result, "Deal bookmarked successfully", 201);
-  }
-});
+);
 
 /**
  * DELETE /deals/:dealId/favorite
  * Remove deal from favorites/bookmarks
  */
-router.delete("/:dealId/favorite", async (req: AuthenticatedRequest, res: Response) => {
-  const userId = AuthHelper.requireAuth(req, res);
-  if (!userId) return;
+router.delete(
+  "/:dealId/favorite",
+  authenticateUser,
+  async (req: AuthenticatedRequest, res: Response) => {
+    const userId = AuthHelper.requireAuth(req, res);
+    if (!userId) return;
 
-  const dealId = ValidationHelper.parseId(req.params.dealId as string);
-  if (dealId === null) {
-    return ResponseHelper.badRequest(res, "Invalid deal ID");
+    const dealId = ValidationHelper.parseId(req.params.dealId as string);
+    if (dealId === null) {
+      return ResponseHelper.badRequest(res, "Invalid deal ID");
+    }
+
+    const result = await DbHelper.executeWithErrorHandling(
+      async () => {
+        // Remove from favorites
+        await db
+          .delete(userFavoriteDeals)
+          .where(and(eq(userFavoriteDeals.userId, userId), eq(userFavoriteDeals.dealId, dealId)));
+
+        return {
+          dealId,
+          bookmarked: false,
+        };
+      },
+      res,
+      "Failed to remove bookmark"
+    );
+
+    if (result) {
+      ResponseHelper.success(res, result, "Deal removed from bookmarks");
+    }
   }
-
-  const result = await DbHelper.executeWithErrorHandling(
-    async () => {
-      // Remove from favorites
-      await db
-        .delete(userFavoriteDeals)
-        .where(and(eq(userFavoriteDeals.userId, userId), eq(userFavoriteDeals.dealId, dealId)));
-
-      return {
-        dealId,
-        bookmarked: false,
-      };
-    },
-    res,
-    "Failed to remove bookmark"
-  );
-
-  if (result) {
-    ResponseHelper.success(res, result, "Deal removed from bookmarks");
-  }
-});
+);
 
 /**
  * GET /deals/favorites
@@ -112,7 +117,7 @@ router.delete("/:dealId/favorite", async (req: AuthenticatedRequest, res: Respon
  * - limit (optional): Number of deals per page (default: 20, max: 100)
  * - status (optional): Filter by deal status (active, expired, etc.)
  */
-router.get("/favorites", async (req: AuthenticatedRequest, res: Response) => {
+router.get("/favorites", authenticateUser, async (req: AuthenticatedRequest, res: Response) => {
   const userId = AuthHelper.requireAuth(req, res);
   if (!userId) return;
 
@@ -197,37 +202,41 @@ router.get("/favorites", async (req: AuthenticatedRequest, res: Response) => {
  * GET /deals/:dealId/favorite-status
  * Check if a specific deal is bookmarked by the user
  */
-router.get("/:dealId/favorite-status", async (req: AuthenticatedRequest, res: Response) => {
-  const userId = AuthHelper.requireAuth(req, res);
-  if (!userId) return;
+router.get(
+  "/:dealId/favorite-status",
+  authenticateUser,
+  async (req: AuthenticatedRequest, res: Response) => {
+    const userId = AuthHelper.requireAuth(req, res);
+    if (!userId) return;
 
-  const dealId = ValidationHelper.parseId(req.params.dealId as string);
-  if (dealId === null) {
-    return ResponseHelper.badRequest(res, "Invalid deal ID");
+    const dealId = ValidationHelper.parseId(req.params.dealId as string);
+    if (dealId === null) {
+      return ResponseHelper.badRequest(res, "Invalid deal ID");
+    }
+
+    const result = await DbHelper.executeWithErrorHandling(
+      async () => {
+        const favorite = await db
+          .select()
+          .from(userFavoriteDeals)
+          .where(and(eq(userFavoriteDeals.userId, userId), eq(userFavoriteDeals.dealId, dealId)))
+          .limit(1);
+
+        return {
+          dealId,
+          isBookmarked: favorite.length > 0,
+          bookmarkedAt: favorite.length > 0 ? favorite[0]?.createdAt || null : null,
+        };
+      },
+      res,
+      "Failed to check favorite status"
+    );
+
+    if (result) {
+      ResponseHelper.success(res, result);
+    }
   }
-
-  const result = await DbHelper.executeWithErrorHandling(
-    async () => {
-      const favorite = await db
-        .select()
-        .from(userFavoriteDeals)
-        .where(and(eq(userFavoriteDeals.userId, userId), eq(userFavoriteDeals.dealId, dealId)))
-        .limit(1);
-
-      return {
-        dealId,
-        isBookmarked: favorite.length > 0,
-        bookmarkedAt: favorite.length > 0 ? favorite[0]?.createdAt || null : null,
-      };
-    },
-    res,
-    "Failed to check favorite status"
-  );
-
-  if (result) {
-    ResponseHelper.success(res, result);
-  }
-});
+);
 
 /**
  * GET /deals
@@ -239,9 +248,68 @@ router.get("/:dealId/favorite-status", async (req: AuthenticatedRequest, res: Re
  * - status (optional): Filter by deal status (default: active)
  * - restaurantId (optional): Filter by restaurant ID
  */
-router.get("/", async (req: AuthenticatedRequest, res: Response) => {
-  // Optional authentication - get userId if available
-  const userId = AuthHelper.getOptionalAuth(req);
+// Optional authentication middleware - doesn't fail if no auth
+const optionalAuth = async (req: AuthenticatedRequest, res: Response, next: () => void) => {
+  try {
+    const authHeader = req.headers.authorization;
+
+    if (!authHeader || !authHeader.startsWith("Bearer ")) {
+      // No auth header, continue without user
+      return next();
+    }
+
+    const token = authHeader.substring(7);
+    if (!token || token === "undefined" || token === "null") {
+      // Invalid token, continue without user
+      return next();
+    }
+
+    // Import the same verification logic
+    const { verifyToken } = await import("@clerk/backend");
+    const { users } = await import("../db/schema.js");
+    const { eq } = await import("drizzle-orm");
+
+    try {
+      // Verify the token with Clerk
+      const payload = await verifyToken(token, {
+        secretKey: process.env.CLERK_SECRET_KEY!,
+      });
+
+      if (payload.sub) {
+        // Find user in our database
+        const dbUser = await db
+          .select()
+          .from(users)
+          .where(eq(users.clerkUserId, payload.sub))
+          .limit(1);
+
+        if (dbUser.length > 0) {
+          // Set user data
+          req.user = {
+            id: dbUser[0]!.id,
+            clerkUserId: dbUser[0]!.clerkUserId,
+            ...(dbUser[0]!.email && { email: dbUser[0]!.email }),
+            ...(dbUser[0]!.displayName && { displayName: dbUser[0]!.displayName }),
+          };
+        }
+      }
+    } catch (authError) {
+      // Token verification failed, continue without user
+      console.log("Optional auth failed:", authError);
+    }
+
+    next();
+  } catch (error) {
+    // Any error in optional auth, continue without user
+    console.log("Optional authentication error:", error);
+    next();
+  }
+};
+
+router.get("/", optionalAuth, async (req: AuthenticatedRequest, res: Response) => {
+  // Get userId from authenticated request (will be undefined for unauthenticated users)
+  const userId = req.user?.id;
+  console.log("GET /deals - Optional auth userId:", userId);
 
   const page = parseInt(req.query.page as string) || 1;
   const limit = Math.min(parseInt(req.query.limit as string) || 20, 100);
@@ -282,6 +350,8 @@ router.get("/", async (req: AuthenticatedRequest, res: Response) => {
             province: restaurants.province,
             ratingAvg: restaurants.ratingAvg,
             ratingCount: restaurants.ratingCount,
+            latitude: restaurants.latitude,
+            longitude: restaurants.longitude,
           },
           partner: {
             id: partners.id,
