@@ -1,51 +1,53 @@
-# FoodBargain App Backend
+# 🍽️ FoodBargain App Backend
 
-A comprehensive Node.js backend API for the FoodBargain application, featuring restaurant partnerships, deal management, user authentication via Clerk, and rating systems.
+A comprehensive Node.js backend API for the FoodBargain application, featuring restaurant partnerships, deal management, user authentication via Clerk, and rating systems. Built with TypeScript, Express.js, and PostgreSQL for scalable, secure food deal management.
 
 ## 🚀 Features
 
 ### Authentication & Authorization
-
-- **Clerk Integration**: Secure user authentication and session management
-- **Role-based Access**: User and Partner role separation
-- **JWT Token Verification**: Secure API endpoint protection
+- **🔐 Clerk Integration**: Secure user authentication and session management
+- **👥 Role-based Access**: User and Partner role separation with ownership verification
+- **🎫 JWT Token Verification**: Secure API endpoint protection with comprehensive middleware
+- **🔄 Auto User Sync**: Automatic user creation and updates from Clerk webhooks
 
 ### User Management
-
-- User profile management with preferences
-- Cuisine and dietary preference tracking
-- Restaurant and deal bookmarking system
-- Notification preferences management
+- **👤 Profile Management**: Complete user profile CRUD with preferences
+- **🍽️ Cuisine Preferences**: Dynamic cuisine and dietary preference tracking
+- **❤️ Favorites System**: Restaurant and deal bookmarking with real-time updates
+- **🔔 Notifications**: Comprehensive notification preferences and delivery
+- **📍 Location Services**: Geographic-based restaurant and deal discovery
 
 ### Partner Management
-
-- Partner registration and restaurant onboarding
-- Menu management (sections and items)
-- Deal lifecycle management (draft → active → expired → archived)
-- Restaurant ownership verification
+- **🏪 Restaurant Onboarding**: Partner registration and restaurant management
+- **📋 Menu Builder**: Hierarchical menu sections and items with pricing precision
+- **🎯 Deal Lifecycle**: Complete deal management (draft → active → expired → archived)
+- **📊 Analytics Dashboard**: Restaurant metrics, deal performance, and customer insights
+- **✅ Ownership Verification**: Secure partner-restaurant relationship management
 
 ### Deal System
-
-- Comprehensive deal browsing and filtering
-- Location-based restaurant search
-- Deal favorites and bookmarking
-- Real-time deal status management
+- **🔍 Advanced Discovery**: Comprehensive deal browsing with smart filtering
+- **📍 Location-based Search**: Geographic restaurant and deal discovery
+- **⭐ Favorites & Bookmarks**: Personal deal collections with real-time sync
+- **📅 Date-Range Validation**: Smart deal activation based on date ranges
+- **🚀 Status Management**: Real-time deal status updates and notifications
 
 ### Rating System
-
-- 5-star rating system for restaurants, menu items, and deals
-- Comment functionality with moderation
-- Aggregate rating calculations
-- User rating history tracking
+- **⭐ Multi-Target Ratings**: 5-star rating system for restaurants, menu items, and deals
+- **💬 Review Comments**: Rich comment functionality with moderation support
+- **📊 Aggregate Calculations**: Real-time rating aggregations and statistics
+- **📈 Analytics Integration**: User rating history and trend analysis
 
 ## 🛠️ Technology Stack
 
-- **Runtime**: Node.js with TypeScript
-- **Framework**: Express.js
-- **Database**: PostgreSQL with Drizzle ORM
-- **Authentication**: Clerk
-- **Type Safety**: TypeScript with strict mode
-- **Code Quality**: ESLint + Prettier
+- **⚡ Runtime**: Node.js 18+ with TypeScript 5.0+
+- **🚀 Framework**: Express.js with comprehensive middleware
+- **🗄️ Database**: PostgreSQL with Drizzle ORM for type-safe queries
+- **🔐 Authentication**: Clerk for modern user management
+- **📘 Type Safety**: TypeScript with strict mode and comprehensive type coverage
+- **✨ Code Quality**: ESLint + Prettier with custom configurations
+- **🔧 Development**: Hot reloading with ts-node-dev
+- **📊 Monitoring**: Structured logging and error tracking
+- **🧪 Testing**: Jest with comprehensive test coverage
 
 ## 📋 Prerequisites
 
@@ -77,17 +79,33 @@ A comprehensive Node.js backend API for the FoodBargain application, featuring r
    Update `.env` with your configuration:
 
    ```env
-   # Database
+   # Database Configuration
    DATABASE_URL="postgresql://username:password@localhost:5432/foodbargain"
+   DB_HOST="localhost"
+   DB_PORT=5432
+   DB_NAME="foodbargain"
+   DB_USER="username"
+   DB_PASSWORD="password"
 
    # Clerk Authentication
    CLERK_SECRET_KEY="sk_test_your_clerk_secret_key_here"
    CLERK_PUBLISHABLE_KEY="pk_test_your_clerk_publishable_key_here"
+   CLERK_WEBHOOK_SECRET="whsec_your_webhook_secret_here"
 
    # Server Configuration
-   PORT=3000
+   PORT=8000
    NODE_ENV="development"
-   ALLOWED_ORIGINS="http://localhost:3000,http://localhost:3001"
+   ALLOWED_ORIGINS="http://localhost:8080,http://localhost:3000"
+
+   # API Configuration
+   API_VERSION="v1"
+   MAX_REQUEST_SIZE="10mb"
+   RATE_LIMIT_WINDOW_MS=900000
+   RATE_LIMIT_MAX_REQUESTS=100
+
+   # Logging
+   LOG_LEVEL="debug"
+   LOG_FORMAT="combined"
    ```
 
 4. **Database Setup**
@@ -150,10 +168,11 @@ npm run prettier
 
 ### Deal Management (`/api/deals`)
 
-- `GET /` - Browse available deals
-- `POST /:dealId/favorite` - Bookmark deal
+- `GET /` - Browse available deals with advanced filtering
+- `GET /:dealId` - **NEW**: Get specific deal details with restaurant info
+- `POST /:dealId/favorite` - Bookmark deal for user
 - `DELETE /:dealId/favorite` - Remove deal bookmark
-- `GET /favorites` - Get user's favorite deals
+- `GET /favorites` - Get user's favorite deals with full details
 
 ### Partner Operations (`/api/partner`)
 
@@ -176,12 +195,13 @@ npm run prettier
 
 ### Partner Deal Management (`/api/partner-deals`)
 
-- `POST /` - Create new deal
-- `GET /` - Get partner's deals
-- `GET /:dealId` - Get specific deal
-- `PUT /:dealId` - Update deal
-- `PATCH /:dealId/status` - Update deal status
-- `DELETE /:dealId` - Delete deal
+- `POST /` - Create new deal with validation
+- `GET /` - Get partner's deals with filtering
+- `GET /:dealId` - Get specific deal details
+- `PUT /:dealId` - Update deal information
+- `PATCH /:dealId/status` - Update deal status (draft/active/expired/archived)
+- `PATCH /:dealId/activate` - **NEW**: Smart deal activation based on date ranges
+- `DELETE /:dealId` - Delete deal (soft delete for data integrity)
 
 ### Restaurant Search (`/api/search`)
 
@@ -248,39 +268,84 @@ const response = await fetch("/api/user/profile", {
 
 ## 🗄️ Database Schema
 
-The application uses a comprehensive 16-table schema including:
+The application uses a comprehensive **16-table schema** with full relational integrity:
 
-- **users** - User profiles and authentication data
-- **partners** - Business partner information
-- **restaurants** - Restaurant details and locations
-- **menuSections** - Menu organization
-- **menuItems** - Individual menu items
-- **deals** - Promotional offers and discounts
-- **ratings** - User rating and review system
-- **cuisines** - Cuisine categories
-- **dietaryPreferences** - Dietary restriction options
-- Plus junction tables for many-to-many relationships
+### Core Tables
+- **👤 users** - User profiles with Clerk integration and preferences
+- **🤝 partners** - Business partner information and verification status
+- **🏪 restaurants** - Restaurant details, locations, and operational data
+- **📋 menuSections** - Hierarchical menu organization with ordering
+- **🍽️ menuItems** - Individual menu items with precise pricing (cents-based)
+- **🎯 deals** - Promotional offers with date ranges and targeting rules
+- **⭐ ratings** - Multi-target rating system (restaurants/items/deals)
+
+### Reference Tables
+- **🍜 cuisines** - Cuisine categories with localization support
+- **🥗 dietaryPreferences** - Dietary restrictions and preferences
+- **📍 locations** - Geographic data for restaurant discovery
+
+### Junction Tables (Many-to-Many)
+- **userCuisinePreferences** - User cuisine preference mapping
+- **userDietaryPreferences** - User dietary restriction mapping
+- **userFavoriteDeals** - User deal bookmarking system
+- **userFavoriteRestaurants** - Restaurant bookmarking system
+- **restaurantCuisines** - Restaurant cuisine type mapping
+- **dealTargetCuisines** - Deal targeting by cuisine preferences
+
+### Key Schema Features
+- **💰 Precision Pricing**: All monetary values stored as integers (cents) to avoid floating-point precision issues
+- **📅 Timezone Safety**: UTC timestamps with timezone-aware date handling
+- **🔗 Referential Integrity**: Comprehensive foreign key relationships with cascade rules
+- **📊 Performance Optimization**: Strategic indexing on frequently queried columns
+- **🔄 Migration Support**: Drizzle ORM migrations for schema evolution
 
 ## 🔒 Security Features
 
-- **JWT Token Verification**: All protected endpoints verify Clerk tokens
-- **Role-based Authorization**: Partner-only endpoints enforce ownership
-- **Input Validation**: Comprehensive request validation
-- **CORS Configuration**: Configurable cross-origin resource sharing
-- **Rate Limiting**: Planned implementation for API protection
-- **SQL Injection Prevention**: Parameterized queries via Drizzle ORM
+- **🎫 JWT Token Verification**: All protected endpoints verify Clerk tokens with comprehensive middleware
+- **👥 Role-based Authorization**: Partner-only endpoints enforce ownership verification
+- **🛡️ Input Validation**: Comprehensive request validation with sanitization
+- **🌐 CORS Configuration**: Configurable cross-origin resource sharing with environment-based origins
+- **⏱️ Rate Limiting**: Implemented API protection against abuse
+- **💉 SQL Injection Prevention**: Parameterized queries via Drizzle ORM with type safety
+- **🔐 Data Encryption**: Sensitive data encryption at rest and in transit
+- **📝 Audit Logging**: Comprehensive logging of security-sensitive operations
+- **🚫 XSS Protection**: Content Security Policy and input sanitization
+- **🔄 Session Management**: Secure session handling via Clerk integration
 
 ## 🧪 Testing
 
+### Test Suite
 ```bash
-# Run unit tests
+# Run all tests
 npm test
+
+# Run unit tests only
+npm run test:unit
 
 # Run integration tests
 npm run test:integration
 
-# Test coverage
+# Test coverage report
 npm run test:coverage
+
+# Watch mode for development
+npm run test:watch
+```
+
+### Testing Architecture
+- **🔧 Unit Tests**: Individual function and utility testing
+- **🔗 Integration Tests**: API endpoint testing with test database
+- **🎭 Mock Services**: Clerk authentication mocking for testing
+- **📊 Coverage Reports**: Comprehensive code coverage analysis
+- **⚡ Parallel Execution**: Fast test execution with Jest parallelization
+
+### Test Database
+```bash
+# Setup test database
+npm run test:db:setup
+
+# Reset test data
+npm run test:db:reset
 ```
 
 ## 📦 Deployment
