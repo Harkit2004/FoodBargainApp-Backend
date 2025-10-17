@@ -1,8 +1,17 @@
 import { Router } from "express";
 import type { Response } from "express";
 import { db } from "../db/db.js";
-import { deals, restaurants, partners, userFavoriteDeals } from "../db/schema.js";
-import { eq, and } from "drizzle-orm";
+import {
+  deals,
+  restaurants,
+  partners,
+  userFavoriteDeals,
+  dealCuisines,
+  dealDietaryPreferences,
+  cuisines,
+  dietaryPreferences,
+} from "../db/schema.js";
+import { eq, and, inArray } from "drizzle-orm";
 import type { AuthenticatedRequest } from "../middleware/auth.js";
 import { authenticateUser } from "../middleware/auth.js";
 import { ResponseHelper, AuthHelper, ValidationHelper, DbHelper } from "../utils/api-helpers.js";
@@ -377,10 +386,63 @@ router.get("/", optionalAuth, async (req: AuthenticatedRequest, res: Response) =
         bookmarkedDealIds = bookmarks.map((b) => b.dealId);
       }
 
-      // Add bookmark status to deals
+      // Fetch cuisines and dietary preferences for all deals
+      const dealIds = allDeals.map((d) => d.id);
+
+      // Get cuisines for all deals
+      const dealCuisinesData =
+        dealIds.length > 0
+          ? await db
+              .select({
+                dealId: dealCuisines.dealId,
+                cuisineId: cuisines.id,
+                cuisineName: cuisines.name,
+              })
+              .from(dealCuisines)
+              .innerJoin(cuisines, eq(dealCuisines.cuisineId, cuisines.id))
+              .where(inArray(dealCuisines.dealId, dealIds))
+          : [];
+
+      // Get dietary preferences for all deals
+      const dealDietaryData =
+        dealIds.length > 0
+          ? await db
+              .select({
+                dealId: dealDietaryPreferences.dealId,
+                dietaryId: dietaryPreferences.id,
+                dietaryName: dietaryPreferences.name,
+              })
+              .from(dealDietaryPreferences)
+              .innerJoin(
+                dietaryPreferences,
+                eq(dealDietaryPreferences.dietaryPreferenceId, dietaryPreferences.id)
+              )
+              .where(inArray(dealDietaryPreferences.dealId, dealIds))
+          : [];
+
+      // Group cuisines and dietary preferences by deal ID
+      const cuisinesByDeal = new Map<number, Array<{ id: number; name: string }>>();
+      dealCuisinesData.forEach((dc) => {
+        if (!cuisinesByDeal.has(dc.dealId)) {
+          cuisinesByDeal.set(dc.dealId, []);
+        }
+        cuisinesByDeal.get(dc.dealId)!.push({ id: dc.cuisineId, name: dc.cuisineName });
+      });
+
+      const dietaryByDeal = new Map<number, Array<{ id: number; name: string }>>();
+      dealDietaryData.forEach((dd) => {
+        if (!dietaryByDeal.has(dd.dealId)) {
+          dietaryByDeal.set(dd.dealId, []);
+        }
+        dietaryByDeal.get(dd.dealId)!.push({ id: dd.dietaryId, name: dd.dietaryName });
+      });
+
+      // Add bookmark status, cuisines, and dietary preferences to deals
       const dealsWithBookmarkStatus = allDeals.map((deal) => ({
         ...deal,
         isBookmarked: bookmarkedDealIds.includes(deal.id),
+        cuisines: cuisinesByDeal.get(deal.id) || [],
+        dietaryPreferences: dietaryByDeal.get(deal.id) || [],
       }));
 
       return {

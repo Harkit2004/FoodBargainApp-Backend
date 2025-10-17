@@ -1,6 +1,6 @@
 import { Router } from "express";
 import type { Request, Response } from "express";
-import { and, asc, desc, eq, like, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, like, or, inArray } from "drizzle-orm";
 import { db } from "../db/db.js";
 import {
   restaurants,
@@ -8,6 +8,8 @@ import {
   deals,
   cuisines,
   dealCuisines,
+  dietaryPreferences,
+  dealDietaryPreferences,
   userFavoriteRestaurants,
   users,
 } from "../db/schema.js";
@@ -59,6 +61,7 @@ router.get("/restaurants", optionalAuth, async (req: Request, res: Response) => 
   const {
     q: searchQuery,
     cuisine,
+    dietaryPreference,
     latitude: userLatStr,
     longitude: userLngStr,
     radius: radiusStr,
@@ -68,6 +71,17 @@ router.get("/restaurants", optionalAuth, async (req: Request, res: Response) => 
     sortOrder,
     hasActiveDeals,
   } = req.query;
+
+  console.log("Search endpoint called with params:", {
+    searchQuery,
+    cuisine,
+    dietaryPreference,
+    userLatStr,
+    userLngStr,
+    radiusStr,
+    page: pageStr,
+    limit: limitStr,
+  });
 
   // Parse and validate parameters
   const userLat = userLatStr ? parseFloat(userLatStr as string) : null;
@@ -112,12 +126,16 @@ router.get("/restaurants", optionalAuth, async (req: Request, res: Response) => 
       }
 
       // Add cuisine filter
+      let cuisineRestaurantIds: number[] | null = null;
       if (cuisine) {
+        console.log("Filtering by cuisine:", cuisine);
         const cuisineId = await db
           .select({ id: cuisines.id })
           .from(cuisines)
           .where(like(cuisines.name, `%${cuisine}%`))
           .limit(1);
+
+        console.log("Found cuisine ID:", cuisineId);
 
         if (cuisineId.length > 0 && cuisineId[0]?.id !== undefined) {
           const restaurantsWithCuisine = await db
@@ -126,11 +144,10 @@ router.get("/restaurants", optionalAuth, async (req: Request, res: Response) => 
             .innerJoin(dealCuisines, eq(deals.id, dealCuisines.dealId))
             .where(and(eq(dealCuisines.cuisineId, cuisineId[0].id), eq(deals.status, "active")));
 
-          const restaurantIds = restaurantsWithCuisine.map((r) => r.restaurantId);
+          cuisineRestaurantIds = [...new Set(restaurantsWithCuisine.map((r) => r.restaurantId))];
+          console.log("Restaurants with cuisine:", cuisineRestaurantIds);
 
-          if (restaurantIds.length > 0) {
-            whereConditions.push(sql`${restaurants.id} IN ${restaurantIds}`);
-          } else {
+          if (cuisineRestaurantIds.length === 0) {
             // No restaurants found with this cuisine
             return {
               restaurants: [],
@@ -156,6 +173,103 @@ router.get("/restaurants", optionalAuth, async (req: Request, res: Response) => 
         }
       }
 
+      // Add dietary preference filter
+      let dietaryRestaurantIds: number[] | null = null;
+      if (dietaryPreference) {
+        console.log("Filtering by dietary preference:", dietaryPreference);
+        const dietPrefId = await db
+          .select({ id: dietaryPreferences.id })
+          .from(dietaryPreferences)
+          .where(like(dietaryPreferences.name, `%${dietaryPreference}%`))
+          .limit(1);
+
+        console.log("Found dietary preference ID:", dietPrefId);
+
+        if (dietPrefId.length > 0 && dietPrefId[0]?.id !== undefined) {
+          const restaurantsWithDietPref = await db
+            .select({ restaurantId: deals.restaurantId })
+            .from(deals)
+            .innerJoin(dealDietaryPreferences, eq(deals.id, dealDietaryPreferences.dealId))
+            .where(
+              and(
+                eq(dealDietaryPreferences.dietaryPreferenceId, dietPrefId[0].id),
+                eq(deals.status, "active")
+              )
+            );
+
+          dietaryRestaurantIds = [...new Set(restaurantsWithDietPref.map((r) => r.restaurantId))];
+          console.log("Restaurants with dietary preference:", dietaryRestaurantIds);
+
+          if (dietaryRestaurantIds.length === 0) {
+            // No restaurants found with this dietary preference
+            return {
+              restaurants: [],
+              searchParams: {
+                query: searchQuery || null,
+                cuisine: cuisine || null,
+                dietaryPreference: dietaryPreference || null,
+                location:
+                  userLat !== null && userLng !== null
+                    ? { latitude: userLat, longitude: userLng, radius }
+                    : null,
+                sortBy: sortBy || "relevance",
+                sortOrder: sortOrder || "asc",
+              },
+              pagination: {
+                currentPage: page,
+                totalPages: 1,
+                totalCount: 0,
+                hasNextPage: false,
+                hasPreviousPage: false,
+              },
+            };
+          }
+        }
+      }
+
+      // Combine cuisine and dietary filters with AND logic
+      // If both filters are active, only include restaurants that match BOTH
+      if (cuisineRestaurantIds !== null && dietaryRestaurantIds !== null) {
+        console.log("Applying AND logic between cuisine and dietary filters");
+        const intersectedIds = cuisineRestaurantIds.filter((id) =>
+          dietaryRestaurantIds!.includes(id)
+        );
+        console.log("Restaurants matching both filters:", intersectedIds.length, "restaurants");
+
+        if (intersectedIds.length > 0) {
+          whereConditions.push(inArray(restaurants.id, intersectedIds));
+        } else {
+          // No restaurants match both filters
+          return {
+            restaurants: [],
+            searchParams: {
+              query: searchQuery || null,
+              cuisine: cuisine || null,
+              dietaryPreference: dietaryPreference || null,
+              location:
+                userLat !== null && userLng !== null
+                  ? { latitude: userLat, longitude: userLng, radius }
+                  : null,
+              sortBy: sortBy || "relevance",
+              sortOrder: sortOrder || "asc",
+            },
+            pagination: {
+              currentPage: page,
+              totalPages: 1,
+              totalCount: 0,
+              hasNextPage: false,
+              hasPreviousPage: false,
+            },
+          };
+        }
+      } else if (cuisineRestaurantIds !== null) {
+        // Only cuisine filter is active
+        whereConditions.push(inArray(restaurants.id, cuisineRestaurantIds));
+      } else if (dietaryRestaurantIds !== null) {
+        // Only dietary filter is active
+        whereConditions.push(inArray(restaurants.id, dietaryRestaurantIds));
+      }
+
       // Add active deals filter
       if (hasActiveDeals === "true") {
         const dealsSubquery = db
@@ -167,7 +281,7 @@ router.get("/restaurants", optionalAuth, async (req: Request, res: Response) => 
         const activeRestaurantIds = restaurantIdsWithActiveDeals.map((d) => d.restaurantId);
 
         if (activeRestaurantIds.length > 0) {
-          whereConditions.push(sql`${restaurants.id} IN ${activeRestaurantIds}`);
+          whereConditions.push(inArray(restaurants.id, activeRestaurantIds));
         } else {
           // No restaurants with active deals
           return {
@@ -247,28 +361,77 @@ router.get("/restaurants", optionalAuth, async (req: Request, res: Response) => 
       // Apply distance filtering if location provided
       let filteredResults = searchResults;
       if (userLat !== null && userLng !== null) {
+        console.log(
+          "Applying distance filter. User location:",
+          { userLat, userLng },
+          "Radius:",
+          radius
+        );
+        console.log("Results before distance filter:", searchResults.length);
+
+        // Log all restaurant locations
+        console.log("All restaurants in database:");
+        searchResults.forEach((restaurant) => {
+          console.log(`  - ${restaurant.name}: (${restaurant.latitude}, ${restaurant.longitude})`);
+        });
+
         filteredResults = searchResults.filter((restaurant) => {
           if (!restaurant.latitude || !restaurant.longitude) return false;
 
-          // Simple distance calculation (rough approximation)
-          const distance =
-            Math.sqrt(
-              Math.pow(restaurant.latitude - userLat, 2) +
-                Math.pow(restaurant.longitude - userLng, 2)
-            ) * 111; // Rough conversion to km
+          // Haversine formula for accurate distance calculation
+          const toRad = (value: number) => (value * Math.PI) / 180;
+          const R = 6371; // Earth's radius in km
 
+          const dLat = toRad(restaurant.latitude - userLat);
+          const dLon = toRad(restaurant.longitude - userLng);
+
+          const a =
+            Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+            Math.cos(toRad(userLat)) *
+              Math.cos(toRad(restaurant.latitude)) *
+              Math.sin(dLon / 2) *
+              Math.sin(dLon / 2);
+
+          const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+          const distance = R * c; // Distance in km
+
+          console.log(
+            `Restaurant ${restaurant.name} at distance ${distance.toFixed(2)}km (limit: ${radius}km)${distance <= radius ? " ✓ INCLUDED" : " ✗ FILTERED OUT"}`
+          );
           return distance <= radius;
         });
+
+        console.log("Results after distance filter:", filteredResults.length);
 
         // Sort by distance if requested
         if (actualSortBy === "distance") {
           filteredResults.sort((a, b) => {
-            const distanceA = Math.sqrt(
-              Math.pow((a.latitude || 0) - userLat, 2) + Math.pow((a.longitude || 0) - userLng, 2)
-            );
-            const distanceB = Math.sqrt(
-              Math.pow((b.latitude || 0) - userLat, 2) + Math.pow((b.longitude || 0) - userLng, 2)
-            );
+            const toRad = (value: number) => (value * Math.PI) / 180;
+            const R = 6371;
+
+            // Calculate distance A
+            const dLatA = toRad((a.latitude || 0) - userLat);
+            const dLonA = toRad((a.longitude || 0) - userLng);
+            const aA =
+              Math.sin(dLatA / 2) * Math.sin(dLatA / 2) +
+              Math.cos(toRad(userLat)) *
+                Math.cos(toRad(a.latitude || 0)) *
+                Math.sin(dLonA / 2) *
+                Math.sin(dLonA / 2);
+            const cA = 2 * Math.atan2(Math.sqrt(aA), Math.sqrt(1 - aA));
+            const distanceA = R * cA;
+
+            // Calculate distance B
+            const dLatB = toRad((b.latitude || 0) - userLat);
+            const dLonB = toRad((b.longitude || 0) - userLng);
+            const aB =
+              Math.sin(dLatB / 2) * Math.sin(dLatB / 2) +
+              Math.cos(toRad(userLat)) *
+                Math.cos(toRad(b.latitude || 0)) *
+                Math.sin(dLonB / 2) *
+                Math.sin(dLonB / 2);
+            const cB = 2 * Math.atan2(Math.sqrt(aB), Math.sqrt(1 - aB));
+            const distanceB = R * cB;
 
             return actualSortOrder === "desc" ? distanceB - distanceA : distanceA - distanceB;
           });
@@ -293,7 +456,7 @@ router.get("/restaurants", optionalAuth, async (req: Request, res: Response) => 
             restaurantId: deals.restaurantId,
           })
           .from(deals)
-          .where(and(sql`${deals.restaurantId} IN ${restaurantIds}`, eq(deals.status, "active")));
+          .where(and(inArray(deals.restaurantId, restaurantIds), eq(deals.status, "active")));
       }
 
       // Get bookmark status for authenticated users
@@ -307,7 +470,7 @@ router.get("/restaurants", optionalAuth, async (req: Request, res: Response) => 
           .where(
             and(
               eq(userFavoriteRestaurants.userId, userId),
-              sql`${userFavoriteRestaurants.restaurantId} IN ${restaurantIds}`
+              inArray(userFavoriteRestaurants.restaurantId, restaurantIds)
             )
           );
 
