@@ -64,6 +64,7 @@ export const restaurants = pgTable("restaurants", {
   province: varchar("province"),
   postalCode: varchar("postal_code"),
   phone: varchar("phone"),
+  imageUrl: varchar("image_url"),
   ratingAvg: decimal("rating_avg", { precision: 3, scale: 2 }).default("0.0"),
   ratingCount: integer("rating_count").default(0),
   latitude: doublePrecision("latitude"),
