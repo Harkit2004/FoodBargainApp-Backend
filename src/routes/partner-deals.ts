@@ -9,11 +9,16 @@ import {
   dietaryPreferences,
   dealCuisines,
   dealDietaryPreferences,
+  userFavoriteRestaurants,
+  users,
+  userNotificationPreferences,
+  notifications,
 } from "../db/schema.js";
 import { eq, and, inArray } from "drizzle-orm";
 import type { AuthenticatedRequest } from "../middleware/auth.js";
 import { authenticateUser, requirePartner } from "../middleware/auth.js";
 import { AuthHelper, DbHelper, ResponseHelper, ValidationHelper } from "../utils/api-helpers.js";
+import { sendNewDealEmail } from "../utils/email.js";
 
 const router = Router();
 
@@ -168,6 +173,118 @@ router.post("/", async (req: AuthenticatedRequest, res: Response) => {
         }));
         await db.insert(dealDietaryPreferences).values(dealDietaryData);
       }
+
+      // Send notifications to users who bookmarked this restaurant with notifyOnDeal=true
+      // Note: Notifications are sent asynchronously to avoid blocking the response
+      setImmediate(async () => {
+        try {
+          // Get restaurant info for notification
+          const restaurantInfo = await db
+            .select()
+            .from(restaurants)
+            .where(eq(restaurants.id, restaurantId))
+            .limit(1);
+
+          if (restaurantInfo.length === 0) {
+            console.warn(`Restaurant ${restaurantId} not found for notifications`);
+            return;
+          }
+
+          const restaurant = restaurantInfo[0];
+          if (!restaurant) {
+            console.warn(`Restaurant ${restaurantId} data is invalid`);
+            return;
+          }
+
+          // Find users who bookmarked this restaurant with notifyOnDeal=true
+          const bookmarkedUsers = await db
+            .select({
+              user: users,
+              notificationPrefs: userNotificationPreferences,
+              bookmark: userFavoriteRestaurants,
+            })
+            .from(userFavoriteRestaurants)
+            .innerJoin(users, eq(userFavoriteRestaurants.userId, users.id))
+            .leftJoin(userNotificationPreferences, eq(userNotificationPreferences.userId, users.id))
+            .where(
+              and(
+                eq(userFavoriteRestaurants.restaurantId, restaurantId),
+                eq(userFavoriteRestaurants.notifyOnDeal, true)
+              )
+            );
+
+          console.log(
+            `📢 Found ${bookmarkedUsers.length} users to notify about new deal at ${restaurant.name}`
+          );
+
+          if (bookmarkedUsers.length === 0) {
+            return;
+          }
+
+          // Format dates for email
+          const formattedStartDate = new Date(startDate).toLocaleDateString("en-US", {
+            weekday: "long",
+            year: "numeric",
+            month: "long",
+            day: "numeric",
+          });
+
+          const formattedEndDate = new Date(endDate).toLocaleDateString("en-US", {
+            weekday: "long",
+            year: "numeric",
+            month: "long",
+            day: "numeric",
+          });
+
+          // Send notifications to each user
+          for (const { user, notificationPrefs } of bookmarkedUsers) {
+            try {
+              // Create in-app notification
+              await db.insert(notifications).values({
+                userId: user.id,
+                dealId,
+                type: "new_deal",
+                title: `🎉 New Deal at ${restaurant.name}`,
+                message: `${restaurant.name} just added a new deal: "${title}"!`,
+              });
+
+              console.log(`✅ Created in-app notification for ${user.email} - Deal: ${title}`);
+
+              // Send email if user has email notifications enabled
+              const emailEnabled = notificationPrefs?.emailNotifications !== false;
+
+              if (emailEnabled && user.email) {
+                const emailSent = await sendNewDealEmail({
+                  userEmail: user.email,
+                  userName: user.displayName || "Valued Customer",
+                  dealTitle: title,
+                  dealDescription: description || "Check out this amazing deal!",
+                  restaurantName: restaurant.name,
+                  startDate: formattedStartDate,
+                  endDate: formattedEndDate,
+                  dealId,
+                });
+
+                if (emailSent) {
+                  console.log(`📧 New deal email sent to ${user.email}`);
+                } else {
+                  console.warn(`⚠️  Failed to send email to ${user.email}`);
+                }
+              } else {
+                console.log(`📵 Email notifications disabled for user ${user.displayName}`);
+              }
+            } catch (error) {
+              console.error(
+                `❌ Failed to send notification to ${user.email} for deal ${dealId}:`,
+                error
+              );
+              // Continue with other users even if one fails
+            }
+          }
+        } catch (error) {
+          console.error("❌ Error sending new deal notifications:", error);
+        }
+      });
 
       return {
         ...newDeal[0],
@@ -372,7 +489,11 @@ router.get("/:dealId", async (req: AuthenticatedRequest, res: Response) => {
   );
 
   if (result === null) {
-    return ResponseHelper.notFound(res);
+    // Only send notFound if headers weren't already sent (error wasn't already handled)
+    if (!res.headersSent) {
+      return ResponseHelper.notFound(res);
+    }
+    return;
   }
 
   return ResponseHelper.success(res, result);
@@ -412,12 +533,11 @@ router.put("/:dealId", async (req: AuthenticatedRequest, res: Response) => {
         return null;
       }
 
-      // Check if deal can be edited (only draft and active deals can be modified)
-      if (
-        existingDeal[0] &&
-        (existingDeal[0].status === "expired" || existingDeal[0].status === "archived")
-      ) {
-        throw new Error("Cannot modify expired or archived deals");
+      // Check if deal can be edited (only archived deals cannot be modified)
+      // Note: Expired deals CAN be edited to allow partners to extend end_date
+      // The automated job will reactivate them if extended
+      if (existingDeal[0] && existingDeal[0].status === "archived") {
+        throw new Error("Cannot modify archived deals");
       }
 
       // Prepare update data
@@ -498,7 +618,11 @@ router.put("/:dealId", async (req: AuthenticatedRequest, res: Response) => {
   );
 
   if (result === null) {
-    return ResponseHelper.notFound(res);
+    // Only send notFound if headers weren't already sent (error wasn't already handled)
+    if (!res.headersSent) {
+      return ResponseHelper.notFound(res);
+    }
+    return;
   }
 
   return ResponseHelper.success(res, result);
@@ -596,7 +720,11 @@ router.patch("/:dealId/status", async (req: AuthenticatedRequest, res: Response)
   );
 
   if (result === null) {
-    return ResponseHelper.notFound(res);
+    // Only send notFound if headers weren't already sent (error wasn't already handled)
+    if (!res.headersSent) {
+      return ResponseHelper.notFound(res);
+    }
+    return;
   }
 
   return ResponseHelper.success(res, result);
@@ -654,7 +782,11 @@ router.delete("/:dealId", async (req: AuthenticatedRequest, res: Response) => {
   );
 
   if (result === null) {
-    return ResponseHelper.notFound(res);
+    // Only send notFound if headers weren't already sent (error wasn't already handled)
+    if (!res.headersSent) {
+      return ResponseHelper.notFound(res);
+    }
+    return;
   }
 
   return ResponseHelper.success(res, result);

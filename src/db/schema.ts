@@ -244,6 +244,20 @@ export const dealReports = pgTable("deal_reports", {
   createdAt: timestamp("created_at").defaultNow(),
 });
 
+// 18. Notifications table
+export const notifications = pgTable("notifications", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+  userId: uuid("user_id")
+    .notNull()
+    .references(() => users.id),
+  dealId: bigint("deal_id", { mode: "number" }).references(() => deals.id),
+  type: varchar("type").notNull(), // 'deal_expiring', 'new_deal', 'system'
+  title: varchar("title").notNull(),
+  message: text("message").notNull(),
+  isRead: boolean("is_read").default(false),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
 // Relations
 export const usersRelations = relations(users, ({ one, many }) => ({
   partner: one(partners),
@@ -254,6 +268,7 @@ export const usersRelations = relations(users, ({ one, many }) => ({
   notificationPreferences: one(userNotificationPreferences),
   ratings: many(ratings),
   dealReports: many(dealReports),
+  notifications: many(notifications),
 }));
 
 export const partnersRelations = relations(partners, ({ one, many }) => ({
@@ -305,4 +320,9 @@ export const dietaryPreferencesRelations = relations(dietaryPreferences, ({ many
 export const dealReportsRelations = relations(dealReports, ({ one }) => ({
   user: one(users, { fields: [dealReports.userId], references: [users.id] }),
   deal: one(deals, { fields: [dealReports.dealId], references: [deals.id] }),
+}));
+
+export const notificationsRelations = relations(notifications, ({ one }) => ({
+  user: one(users, { fields: [notifications.userId], references: [users.id] }),
+  deal: one(deals, { fields: [notifications.dealId], references: [deals.id] }),
 }));

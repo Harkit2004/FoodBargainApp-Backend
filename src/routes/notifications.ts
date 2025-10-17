@@ -7,8 +7,9 @@ import {
   userFavoriteRestaurants,
   userNotificationPreferences,
   deals,
+  notifications,
 } from "../db/schema.js";
-import { eq, and } from "drizzle-orm";
+import { eq, and, desc } from "drizzle-orm";
 import type { AuthenticatedRequest } from "../middleware/auth.js";
 import { authenticateUser } from "../middleware/auth.js";
 import { ResponseHelper, AuthHelper, ValidationHelper, DbHelper } from "../utils/api-helpers.js";
@@ -448,6 +449,183 @@ router.put("/preferences", async (req: AuthenticatedRequest, res: Response) => {
   if (result) {
     const { message, ...data } = result;
     ResponseHelper.success(res, data, message);
+  }
+});
+
+/**
+ * GET /notifications
+ * Get user's notifications
+ *
+ * Query parameters:
+ * - page (optional): Page number (default: 1)
+ * - limit (optional): Results per page (default: 20, max: 100)
+ * - unreadOnly (optional): Only fetch unread notifications (default: false)
+ */
+router.get("/", async (req: AuthenticatedRequest, res: Response) => {
+  const userId = AuthHelper.requireAuth(req, res);
+  if (!userId) return;
+
+  const page = parseInt(req.query.page as string) || 1;
+  const limit = Math.min(parseInt(req.query.limit as string) || 20, 100);
+  const offset = (page - 1) * limit;
+  const unreadOnly = req.query.unreadOnly === "true";
+
+  const result = await DbHelper.executeWithErrorHandling(
+    async () => {
+      const query = db
+        .select({
+          id: notifications.id,
+          type: notifications.type,
+          title: notifications.title,
+          message: notifications.message,
+          isRead: notifications.isRead,
+          createdAt: notifications.createdAt,
+          dealId: notifications.dealId,
+        })
+        .from(notifications)
+        .where(
+          unreadOnly
+            ? and(eq(notifications.userId, userId), eq(notifications.isRead, false))
+            : eq(notifications.userId, userId)
+        )
+        .orderBy(desc(notifications.createdAt))
+        .limit(limit)
+        .offset(offset);
+
+      const userNotifications = await query;
+
+      // Get total count for pagination
+      const countResult = await db
+        .select({ count: notifications.id })
+        .from(notifications)
+        .where(
+          unreadOnly
+            ? and(eq(notifications.userId, userId), eq(notifications.isRead, false))
+            : eq(notifications.userId, userId)
+        );
+
+      const totalCount = countResult.length;
+
+      return {
+        notifications: userNotifications,
+        pagination: {
+          currentPage: page,
+          totalPages: Math.ceil(totalCount / limit),
+          totalCount,
+          hasNextPage: offset + userNotifications.length < totalCount,
+          hasPreviousPage: page > 1,
+        },
+      };
+    },
+    res,
+    "Failed to fetch notifications"
+  );
+
+  if (result) {
+    ResponseHelper.success(res, result);
+  }
+});
+
+/**
+ * GET /notifications/unread-count
+ * Get count of unread notifications
+ */
+router.get("/unread-count", async (req: AuthenticatedRequest, res: Response) => {
+  const userId = AuthHelper.requireAuth(req, res);
+  if (!userId) return;
+
+  const result = await DbHelper.executeWithErrorHandling(
+    async () => {
+      const countResult = await db
+        .select({ count: notifications.id })
+        .from(notifications)
+        .where(and(eq(notifications.userId, userId), eq(notifications.isRead, false)));
+
+      return {
+        count: countResult.length,
+      };
+    },
+    res,
+    "Failed to fetch unread notification count"
+  );
+
+  if (result) {
+    ResponseHelper.success(res, result);
+  }
+});
+
+/**
+ * PATCH /notifications/:id/read
+ * Mark a notification as read
+ */
+router.patch("/:id/read", async (req: AuthenticatedRequest, res: Response) => {
+  const userId = AuthHelper.requireAuth(req, res);
+  if (!userId) return;
+
+  const notificationId = ValidationHelper.parseId(req.params.id as string);
+  if (notificationId === null) {
+    return ResponseHelper.badRequest(res, "Invalid notification ID");
+  }
+
+  const result = await DbHelper.executeWithErrorHandling(
+    async () => {
+      // Check if notification belongs to user
+      const notification = await db
+        .select()
+        .from(notifications)
+        .where(and(eq(notifications.id, notificationId), eq(notifications.userId, userId)))
+        .limit(1);
+
+      if (notification.length === 0) {
+        throw new Error("Notification not found");
+      }
+
+      // Mark as read
+      const updated = await db
+        .update(notifications)
+        .set({ isRead: true })
+        .where(eq(notifications.id, notificationId))
+        .returning();
+
+      return {
+        id: updated[0]?.id,
+        isRead: updated[0]?.isRead,
+      };
+    },
+    res,
+    "Failed to mark notification as read"
+  );
+
+  if (result) {
+    ResponseHelper.success(res, result, "Notification marked as read");
+  }
+});
+
+/**
+ * PATCH /notifications/mark-all-read
+ * Mark all notifications as read for the user
+ */
+router.patch("/mark-all-read", async (req: AuthenticatedRequest, res: Response) => {
+  const userId = AuthHelper.requireAuth(req, res);
+  if (!userId) return;
+
+  const result = await DbHelper.executeWithErrorHandling(
+    async () => {
+      await db
+        .update(notifications)
+        .set({ isRead: true })
+        .where(and(eq(notifications.userId, userId), eq(notifications.isRead, false)));
+
+      return {
+        success: true,
+      };
+    },
+    res,
+    "Failed to mark all notifications as read"
+  );
+
+  if (result) {
+    ResponseHelper.success(res, result, "All notifications marked as read");
   }
 });
 
