@@ -1,4 +1,5 @@
 import authRoutes from "./auth.js";
+import dealReportsRoutes from "./deal-reports.js";
 import dealsRoutes from "./deals.js";
 import menuRoutes from "./menu.js";
 import notificationsRoutes from "./notifications.js";
@@ -11,6 +12,7 @@ import userRoutes from "./user.js";
 
 export {
   authRoutes,
+  dealReportsRoutes,
   dealsRoutes,
   menuRoutes,
   notificationsRoutes,
@@ -25,6 +27,7 @@ export {
 // Default export for convenient importing
 export default {
   auth: authRoutes,
+  dealReports: dealReportsRoutes,
   deals: dealsRoutes,
   menu: menuRoutes,
   notifications: notificationsRoutes,

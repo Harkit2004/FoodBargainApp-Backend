@@ -230,6 +230,20 @@ export const ratings = pgTable("ratings", {
   updatedAt: timestamp("updated_at").defaultNow(),
 });
 
+// 17. Deal reports table
+export const dealReports = pgTable("deal_reports", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+  userId: uuid("user_id")
+    .notNull()
+    .references(() => users.id),
+  dealId: bigint("deal_id", { mode: "number" })
+    .notNull()
+    .references(() => deals.id),
+  reason: text("reason").notNull(),
+  jiraTicketId: varchar("jira_ticket_id"),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
 // Relations
 export const usersRelations = relations(users, ({ one, many }) => ({
   partner: one(partners),
@@ -239,6 +253,7 @@ export const usersRelations = relations(users, ({ one, many }) => ({
   dietaryPreferences: many(userDietaryPreferences),
   notificationPreferences: one(userNotificationPreferences),
   ratings: many(ratings),
+  dealReports: many(dealReports),
 }));
 
 export const partnersRelations = relations(partners, ({ one, many }) => ({
@@ -274,6 +289,7 @@ export const dealsRelations = relations(deals, ({ one, many }) => ({
   cuisines: many(dealCuisines),
   dietaryPreferences: many(dealDietaryPreferences),
   favoriteByUsers: many(userFavoriteDeals),
+  reports: many(dealReports),
 }));
 
 export const cuisinesRelations = relations(cuisines, ({ many }) => ({
@@ -284,4 +300,9 @@ export const cuisinesRelations = relations(cuisines, ({ many }) => ({
 export const dietaryPreferencesRelations = relations(dietaryPreferences, ({ many }) => ({
   deals: many(dealDietaryPreferences),
   users: many(userDietaryPreferences),
+}));
+
+export const dealReportsRelations = relations(dealReports, ({ one }) => ({
+  user: one(users, { fields: [dealReports.userId], references: [users.id] }),
+  deal: one(deals, { fields: [dealReports.dealId], references: [deals.id] }),
 }));

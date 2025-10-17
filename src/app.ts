@@ -5,6 +5,7 @@ import "dotenv/config";
 import {
   authRoutes,
   userRoutes,
+  dealReportsRoutes,
   dealsRoutes,
   partnerRoutes,
   menuRoutes,
@@ -73,6 +74,7 @@ app.get("/health", (req, res) => {
 // API Routes
 app.use("/api/auth", authRoutes);
 app.use("/api/user", userRoutes);
+app.use("/api/deal-reports", dealReportsRoutes);
 app.use("/api/deals", dealsRoutes);
 app.use("/api/partner", partnerRoutes);
 app.use("/api/menu", menuRoutes);
