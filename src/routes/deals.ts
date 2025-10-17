@@ -187,8 +187,66 @@ router.get("/favorites", authenticateUser, async (req: AuthenticatedRequest, res
       const totalCount = totalCountResult.length;
       const totalPages = Math.ceil(totalCount / limit);
 
+      // Fetch cuisines and dietary preferences for all favorite deals
+      const dealIds = favoriteDeals.map((d) => d.id);
+
+      // Get cuisines for all deals
+      const dealCuisinesData =
+        dealIds.length > 0
+          ? await db
+              .select({
+                dealId: dealCuisines.dealId,
+                cuisineId: cuisines.id,
+                cuisineName: cuisines.name,
+              })
+              .from(dealCuisines)
+              .innerJoin(cuisines, eq(dealCuisines.cuisineId, cuisines.id))
+              .where(inArray(dealCuisines.dealId, dealIds))
+          : [];
+
+      // Get dietary preferences for all deals
+      const dealDietaryData =
+        dealIds.length > 0
+          ? await db
+              .select({
+                dealId: dealDietaryPreferences.dealId,
+                dietaryId: dietaryPreferences.id,
+                dietaryName: dietaryPreferences.name,
+              })
+              .from(dealDietaryPreferences)
+              .innerJoin(
+                dietaryPreferences,
+                eq(dealDietaryPreferences.dietaryPreferenceId, dietaryPreferences.id)
+              )
+              .where(inArray(dealDietaryPreferences.dealId, dealIds))
+          : [];
+
+      // Group cuisines and dietary preferences by deal ID
+      const cuisinesByDeal = new Map<number, Array<{ id: number; name: string }>>();
+      dealCuisinesData.forEach((dc) => {
+        if (!cuisinesByDeal.has(dc.dealId)) {
+          cuisinesByDeal.set(dc.dealId, []);
+        }
+        cuisinesByDeal.get(dc.dealId)!.push({ id: dc.cuisineId, name: dc.cuisineName });
+      });
+
+      const dietaryByDeal = new Map<number, Array<{ id: number; name: string }>>();
+      dealDietaryData.forEach((dd) => {
+        if (!dietaryByDeal.has(dd.dealId)) {
+          dietaryByDeal.set(dd.dealId, []);
+        }
+        dietaryByDeal.get(dd.dealId)!.push({ id: dd.dietaryId, name: dd.dietaryName });
+      });
+
+      // Add cuisines and dietary preferences to deals
+      const dealsWithTags = favoriteDeals.map((deal) => ({
+        ...deal,
+        cuisines: cuisinesByDeal.get(deal.id) || [],
+        dietaryPreferences: dietaryByDeal.get(deal.id) || [],
+      }));
+
       return {
-        deals: favoriteDeals,
+        deals: dealsWithTags,
         pagination: {
           currentPage: page,
           totalPages,
