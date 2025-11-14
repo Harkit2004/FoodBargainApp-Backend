@@ -1,6 +1,6 @@
 import { Router } from "express";
 import type { Request, Response } from "express";
-import { and, asc, desc, eq, like, or, inArray } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNotNull, sql } from "drizzle-orm";
 import { db } from "../db/db.js";
 import {
   restaurants,
@@ -11,6 +11,7 @@ import {
   dietaryPreferences,
   dealDietaryPreferences,
   userFavoriteRestaurants,
+  userFavoriteDeals,
   users,
 } from "../db/schema.js";
 import { ResponseHelper, AuthHelper, ValidationHelper, DbHelper } from "../utils/api-helpers.js";
@@ -53,474 +54,800 @@ const optionalAuth = async (req: Request, res: Response, next: () => void) => {
   next();
 };
 
-/**
- * GET /search/restaurants
- * Search for restaurants with various filters
- */
-router.get("/restaurants", optionalAuth, async (req: Request, res: Response) => {
-  const {
-    q: searchQuery,
-    cuisine,
-    dietaryPreference,
-    latitude: userLatStr,
-    longitude: userLngStr,
-    radius: radiusStr,
-    page: pageStr,
-    limit: limitStr,
+type ShowType = "all" | "restaurants" | "deals";
+type SearchSort = "relevance" | "rating" | "distance";
+
+type RawSearchFilters = {
+  query: string | null;
+  showType: ShowType;
+  cuisineIds: number[];
+  cuisineNames: string[];
+  dietaryPreferenceIds: number[];
+  dietaryPreferenceNames: string[];
+  distanceKm: number | null;
+  latitude: number | null;
+  longitude: number | null;
+  page: number;
+  limit: number;
+  sortBy: SearchSort;
+  sortOrder: "asc" | "desc";
+  hasActiveDeals: boolean;
+};
+
+type SearchFilters = Omit<RawSearchFilters, "cuisineNames" | "dietaryPreferenceNames">;
+
+type SearchPagination = {
+  currentPage: number;
+  totalPages: number;
+  totalCount: number;
+  hasNextPage: boolean;
+  hasPreviousPage: boolean;
+};
+
+type SearchResult<T> = {
+  items: T[];
+  pagination: SearchPagination;
+};
+
+type RestaurantSearchRow = {
+  id: number;
+  name: string;
+  description: string | null;
+  streetAddress: string | null;
+  city: string | null;
+  province: string | null;
+  latitude: number | null;
+  longitude: number | null;
+  ratingAvg: string | null;
+  ratingCount: number | null;
+  openingTime: string | null;
+  closingTime: string | null;
+  createdAt: Date | null;
+  partner: {
+    businessName: string;
+  };
+  distanceKm: number | null;
+  activeDeals: Array<{
+    id: number;
+    title: string;
+    description: string | null;
+    restaurantId: number;
+    cuisines: Array<{ id: number; name: string }>;
+    dietaryPreferences: Array<{ id: number; name: string }>;
+  }>;
+  activeDealsCount: number;
+  isBookmarked: boolean;
+};
+
+type DealSearchRow = {
+  id: number;
+  title: string;
+  description: string | null;
+  status: "draft" | "active" | "expired" | "archived";
+  startDate: string;
+  endDate: string;
+  createdAt: Date | null;
+  restaurant: {
+    id: number;
+    name: string;
+    streetAddress: string | null;
+    city: string | null;
+    province: string | null;
+    latitude: number | null;
+    longitude: number | null;
+    ratingAvg: string | null;
+    ratingCount: number | null;
+  };
+  partner: {
+    id: number;
+    businessName: string;
+  };
+  cuisines: Array<{ id: number; name: string }>;
+  dietaryPreferences: Array<{ id: number; name: string }>;
+  isBookmarked: boolean;
+  distanceKm: number | null;
+};
+
+type RestaurantSearchResult = SearchResult<RestaurantSearchRow>;
+type DealSearchResult = SearchResult<DealSearchRow>;
+
+const parseNumberArrayParam = (value: unknown): number[] => {
+  if (!value) return [];
+  const values = Array.isArray(value) ? value : [value];
+  const numbers = values
+    .flatMap((entry) => String(entry).split(","))
+    .map((segment) => parseInt(segment.trim(), 10))
+    .filter((num) => !Number.isNaN(num));
+
+  return [...new Set(numbers)];
+};
+
+const parseStringArrayParam = (value: unknown): string[] => {
+  if (!value) return [];
+  const values = Array.isArray(value) ? value : [value];
+  const strings = values
+    .flatMap((entry) => String(entry).split(","))
+    .map((segment) => segment.trim())
+    .filter((segment) => segment.length > 0);
+
+  return [...new Set(strings)];
+};
+
+const parseSearchFilters = (req: Request): RawSearchFilters => {
+  const queryParam = typeof req.query.q === "string" ? req.query.q : req.query.query;
+  const query =
+    typeof queryParam === "string" && queryParam.trim().length > 0 ? queryParam.trim() : null;
+
+  const showTypeRaw = (req.query.showType || req.query.entityType || req.query.type) as
+    | string
+    | undefined;
+  const showType: ShowType =
+    showTypeRaw === "restaurants" || showTypeRaw === "deals" ? showTypeRaw : "all";
+
+  const distanceParam = req.query.distance ?? req.query.radius ?? null;
+  const parsedDistance = typeof distanceParam === "string" ? parseFloat(distanceParam) : null;
+  const distanceKm =
+    parsedDistance !== null && !Number.isNaN(parsedDistance) && parsedDistance > 0
+      ? parsedDistance
+      : null;
+
+  const latitudeParam =
+    typeof req.query.latitude === "string" ? parseFloat(req.query.latitude) : null;
+  const latitude = latitudeParam !== null && !Number.isNaN(latitudeParam) ? latitudeParam : null;
+
+  const longitudeParam =
+    typeof req.query.longitude === "string" ? parseFloat(req.query.longitude) : null;
+  const longitude =
+    longitudeParam !== null && !Number.isNaN(longitudeParam) ? longitudeParam : null;
+
+  const pageParam = typeof req.query.page === "string" ? parseInt(req.query.page, 10) : 1;
+  const page = !Number.isNaN(pageParam) && pageParam > 0 ? pageParam : 1;
+
+  const limitParam = typeof req.query.limit === "string" ? parseInt(req.query.limit, 10) : 20;
+  const limit = Math.min(Math.max(1, Number.isNaN(limitParam) ? 20 : limitParam), 100);
+
+  const sortByRaw = typeof req.query.sortBy === "string" ? req.query.sortBy : "relevance";
+  const sortBy: SearchSort =
+    sortByRaw === "rating" || sortByRaw === "distance" ? sortByRaw : "relevance";
+
+  const sortOrderRaw = typeof req.query.sortOrder === "string" ? req.query.sortOrder : undefined;
+  let sortOrder: "asc" | "desc";
+  if (sortOrderRaw === "desc" || sortOrderRaw === "asc") {
+    sortOrder = sortOrderRaw;
+  } else if (sortBy === "rating" || sortBy === "relevance") {
+    sortOrder = "desc";
+  } else {
+    sortOrder = "asc";
+  }
+
+  const cuisineIds = [
+    ...parseNumberArrayParam(req.query.cuisineIds),
+    ...parseNumberArrayParam(req.query.cuisineId),
+  ];
+  const dietaryPreferenceIds = [
+    ...parseNumberArrayParam(req.query.dietaryPreferenceIds),
+    ...parseNumberArrayParam(req.query.dietaryPreferenceId),
+  ];
+
+  const cuisineNames = parseStringArrayParam(req.query.cuisine || req.query.cuisines);
+  const dietaryPreferenceNames = parseStringArrayParam(
+    req.query.dietaryPreference || req.query.dietaryPreferences
+  );
+
+  const hasActiveDeals = req.query.hasActiveDeals === "true";
+
+  return {
+    query,
+    showType,
+    cuisineIds,
+    cuisineNames,
+    dietaryPreferenceIds,
+    dietaryPreferenceNames,
+    distanceKm,
+    latitude,
+    longitude,
+    page,
+    limit,
     sortBy,
     sortOrder,
     hasActiveDeals,
-  } = req.query;
+  };
+};
 
-  console.log("Search endpoint called with params:", {
-    searchQuery,
-    cuisine,
-    dietaryPreference,
-    userLatStr,
-    userLngStr,
-    radiusStr,
-    page: pageStr,
-    limit: limitStr,
-  });
+const hydrateSearchFilters = async (filters: RawSearchFilters): Promise<SearchFilters> => {
+  let cuisineIds = filters.cuisineIds;
+  if (cuisineIds.length === 0 && filters.cuisineNames.length > 0) {
+    const cuisineRows = await db
+      .select({ id: cuisines.id })
+      .from(cuisines)
+      .where(inArray(cuisines.name, filters.cuisineNames));
+    cuisineIds = cuisineRows.map((row) => row.id);
+  }
 
-  // Parse and validate parameters
-  const userLat = userLatStr ? parseFloat(userLatStr as string) : null;
-  const userLng = userLngStr ? parseFloat(userLngStr as string) : null;
-  const radius = radiusStr ? parseFloat(radiusStr as string) : 50; // Default 50km
-  const page = Math.max(1, parseInt(pageStr as string) || 1);
-  const limit = Math.min(Math.max(1, parseInt(limitStr as string) || 20), 100);
-  const offset = (page - 1) * limit;
+  let dietaryIds = filters.dietaryPreferenceIds;
+  if (dietaryIds.length === 0 && filters.dietaryPreferenceNames.length > 0) {
+    const dietaryRows = await db
+      .select({ id: dietaryPreferences.id })
+      .from(dietaryPreferences)
+      .where(inArray(dietaryPreferences.name, filters.dietaryPreferenceNames));
+    dietaryIds = dietaryRows.map((row) => row.id);
+  }
 
-  // Validate location parameters
-  if ((userLat !== null && userLng === null) || (userLat === null && userLng !== null)) {
+  return {
+    query: filters.query,
+    showType: filters.showType,
+    cuisineIds,
+    dietaryPreferenceIds: dietaryIds,
+    distanceKm: filters.distanceKm,
+    latitude: filters.latitude,
+    longitude: filters.longitude,
+    page: filters.page,
+    limit: filters.limit,
+    sortBy: filters.sortBy,
+    sortOrder: filters.sortOrder,
+    hasActiveDeals: filters.hasActiveDeals,
+  };
+};
+
+const buildDistanceExpression = (
+  latitudeColumn: typeof restaurants.latitude,
+  longitudeColumn: typeof restaurants.longitude,
+  latitude: number | null,
+  longitude: number | null
+) => {
+  if (latitude === null || longitude === null) {
+    return null;
+  }
+
+  return sql<number>`
+    6371 * acos(
+      least(
+        1,
+        greatest(
+          -1,
+          cos(radians(${latitude})) * cos(radians(${latitudeColumn})) *
+          cos(radians(${longitudeColumn}) - radians(${longitude})) +
+          sin(radians(${latitude})) * sin(radians(${latitudeColumn}))
+        )
+      )
+    )
+  `;
+};
+
+const intersectIds = (current: number[] | null, next: number[]): number[] | null => {
+  if (current === null) {
+    return [...new Set(next)];
+  }
+
+  const nextSet = new Set(next);
+  return current.filter((id) => nextSet.has(id));
+};
+
+const createEmptyResult = <T>(filters: SearchFilters): SearchResult<T> => ({
+  items: [],
+  pagination: {
+    currentPage: filters.page,
+    totalPages: 1,
+    totalCount: 0,
+    hasNextPage: false,
+    hasPreviousPage: filters.page > 1,
+  },
+});
+
+const getRestaurantSearchResults = async (
+  filters: SearchFilters,
+  userId?: string
+): Promise<RestaurantSearchResult> => {
+  let filteredRestaurantIds: number[] | null = null;
+
+  if (filters.hasActiveDeals) {
+    const activeRestaurants = await db
+      .selectDistinct({ restaurantId: deals.restaurantId })
+      .from(deals)
+      .where(eq(deals.status, "active"));
+    filteredRestaurantIds = intersectIds(
+      filteredRestaurantIds,
+      activeRestaurants.map((row) => row.restaurantId)
+    );
+    if (!filteredRestaurantIds || filteredRestaurantIds.length === 0) {
+      return createEmptyResult(filters);
+    }
+  }
+
+  const whereConditions: import("drizzle-orm").SQLWrapper[] = [eq(restaurants.isActive, true)];
+
+  if (filters.query) {
+    const term = `%${filters.query}%`;
+    whereConditions.push(
+      sql`(${restaurants.name} ILIKE ${term} OR ${partners.businessName} ILIKE ${term} OR COALESCE(${restaurants.description}, '') ILIKE ${term})`
+    );
+  }
+
+  if (filteredRestaurantIds && filteredRestaurantIds.length > 0) {
+    whereConditions.push(inArray(restaurants.id, filteredRestaurantIds));
+  }
+
+  const distanceExpr = buildDistanceExpression(
+    restaurants.latitude,
+    restaurants.longitude,
+    filters.latitude,
+    filters.longitude
+  );
+
+  const offset = (filters.page - 1) * filters.limit;
+
+  let orderByClause;
+  if (filters.sortBy === "rating") {
+    orderByClause =
+      filters.sortOrder === "asc" ? asc(restaurants.ratingAvg) : desc(restaurants.ratingAvg);
+  } else if (filters.sortBy === "distance" && distanceExpr) {
+    orderByClause = filters.sortOrder === "desc" ? desc(distanceExpr) : asc(distanceExpr);
+  } else {
+    orderByClause =
+      filters.sortOrder === "asc" ? asc(restaurants.createdAt) : desc(restaurants.createdAt);
+  }
+
+  const selection = {
+    id: restaurants.id,
+    name: restaurants.name,
+    description: restaurants.description,
+    streetAddress: restaurants.streetAddress,
+    city: restaurants.city,
+    province: restaurants.province,
+    latitude: restaurants.latitude,
+    longitude: restaurants.longitude,
+    ratingAvg: restaurants.ratingAvg,
+    ratingCount: restaurants.ratingCount,
+    openingTime: restaurants.openingTime,
+    closingTime: restaurants.closingTime,
+    createdAt: restaurants.createdAt,
+    partner: {
+      businessName: partners.businessName,
+    },
+    distanceKm: distanceExpr ?? sql<number | null>`NULL`,
+  };
+
+  const restaurantRows = await db
+    .select(selection)
+    .from(restaurants)
+    .innerJoin(partners, eq(restaurants.partnerId, partners.id))
+    .where(and(...whereConditions))
+    .orderBy(orderByClause)
+    .limit(filters.limit)
+    .offset(offset);
+
+  const totalCountResult = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(restaurants)
+    .where(and(...whereConditions));
+  const totalCount = totalCountResult[0]?.count ?? 0;
+  const totalPages = Math.max(1, Math.ceil(totalCount / filters.limit));
+
+  const restaurantIds = restaurantRows.map((row) => row.id);
+
+  const activeDealsMap = new Map<
+    number,
+    Array<{
+      id: number;
+      title: string;
+      description: string | null;
+      restaurantId: number;
+      cuisines: Array<{ id: number; name: string }>;
+      dietaryPreferences: Array<{ id: number; name: string }>;
+    }>
+  >();
+  if (restaurantIds.length > 0) {
+    const activeDealsRows = await db
+      .select({
+        id: deals.id,
+        title: deals.title,
+        description: deals.description,
+        restaurantId: deals.restaurantId,
+      })
+      .from(deals)
+      .where(and(inArray(deals.restaurantId, restaurantIds), eq(deals.status, "active")));
+
+    const activeDealIds = activeDealsRows.map((dealRow) => dealRow.id);
+
+    const cuisinesByDeal = new Map<number, Array<{ id: number; name: string }>>();
+    const dietaryByDeal = new Map<number, Array<{ id: number; name: string }>>();
+
+    if (activeDealIds.length > 0) {
+      const cuisineRows = await db
+        .select({
+          dealId: dealCuisines.dealId,
+          id: cuisines.id,
+          name: cuisines.name,
+        })
+        .from(dealCuisines)
+        .innerJoin(cuisines, eq(dealCuisines.cuisineId, cuisines.id))
+        .where(inArray(dealCuisines.dealId, activeDealIds));
+
+      cuisineRows.forEach((row) => {
+        if (!cuisinesByDeal.has(row.dealId)) {
+          cuisinesByDeal.set(row.dealId, []);
+        }
+        cuisinesByDeal.get(row.dealId)!.push({ id: row.id, name: row.name });
+      });
+
+      const dietaryRows = await db
+        .select({
+          dealId: dealDietaryPreferences.dealId,
+          id: dietaryPreferences.id,
+          name: dietaryPreferences.name,
+        })
+        .from(dealDietaryPreferences)
+        .innerJoin(
+          dietaryPreferences,
+          eq(dealDietaryPreferences.dietaryPreferenceId, dietaryPreferences.id)
+        )
+        .where(inArray(dealDietaryPreferences.dealId, activeDealIds));
+
+      dietaryRows.forEach((row) => {
+        if (!dietaryByDeal.has(row.dealId)) {
+          dietaryByDeal.set(row.dealId, []);
+        }
+        dietaryByDeal.get(row.dealId)!.push({ id: row.id, name: row.name });
+      });
+    }
+
+    activeDealsRows.forEach((dealRow) => {
+      if (!activeDealsMap.has(dealRow.restaurantId)) {
+        activeDealsMap.set(dealRow.restaurantId, []);
+      }
+      activeDealsMap.get(dealRow.restaurantId)!.push({
+        ...dealRow,
+        cuisines: cuisinesByDeal.get(dealRow.id) ?? [],
+        dietaryPreferences: dietaryByDeal.get(dealRow.id) ?? [],
+      });
+    });
+  }
+
+  let bookmarkedRestaurantIds: number[] = [];
+  if (userId && restaurantIds.length > 0) {
+    const bookmarks = await db
+      .select({ restaurantId: userFavoriteRestaurants.restaurantId })
+      .from(userFavoriteRestaurants)
+      .where(
+        and(
+          eq(userFavoriteRestaurants.userId, userId),
+          inArray(userFavoriteRestaurants.restaurantId, restaurantIds)
+        )
+      );
+    bookmarkedRestaurantIds = bookmarks.map((bookmark) => bookmark.restaurantId);
+  }
+
+  return {
+    items: restaurantRows.map((row) => ({
+      ...row,
+      activeDeals: activeDealsMap.get(row.id) ?? [],
+      activeDealsCount: activeDealsMap.get(row.id)?.length ?? 0,
+      isBookmarked: bookmarkedRestaurantIds.includes(row.id),
+    })),
+    pagination: {
+      currentPage: filters.page,
+      totalPages,
+      totalCount,
+      hasNextPage: filters.page < totalPages,
+      hasPreviousPage: filters.page > 1,
+    },
+  };
+};
+
+const getDealSearchResults = async (
+  filters: SearchFilters,
+  userId?: string
+): Promise<DealSearchResult> => {
+  let filteredDealIds: number[] | null = null;
+
+  if (filters.cuisineIds.length > 0) {
+    const cuisineMatches = await db
+      .selectDistinct({ dealId: dealCuisines.dealId })
+      .from(dealCuisines)
+      .where(inArray(dealCuisines.cuisineId, filters.cuisineIds));
+    filteredDealIds = intersectIds(
+      filteredDealIds,
+      cuisineMatches.map((row) => row.dealId)
+    );
+    if (!filteredDealIds || filteredDealIds.length === 0) {
+      return createEmptyResult(filters);
+    }
+  }
+
+  if (filters.dietaryPreferenceIds.length > 0) {
+    const dietaryMatches = await db
+      .selectDistinct({ dealId: dealDietaryPreferences.dealId })
+      .from(dealDietaryPreferences)
+      .where(inArray(dealDietaryPreferences.dietaryPreferenceId, filters.dietaryPreferenceIds));
+    filteredDealIds = intersectIds(
+      filteredDealIds,
+      dietaryMatches.map((row) => row.dealId)
+    );
+    if (!filteredDealIds || filteredDealIds.length === 0) {
+      return createEmptyResult(filters);
+    }
+  }
+
+  const whereConditions: import("drizzle-orm").SQLWrapper[] = [eq(deals.status, "active")];
+
+  if (filters.query) {
+    const term = `%${filters.query}%`;
+    whereConditions.push(
+      sql`(${deals.title} ILIKE ${term} OR COALESCE(${deals.description}, '') ILIKE ${term} OR ${restaurants.name} ILIKE ${term})`
+    );
+  }
+
+  if (filteredDealIds && filteredDealIds.length > 0) {
+    whereConditions.push(inArray(deals.id, filteredDealIds));
+  }
+
+  const distanceExpr = buildDistanceExpression(
+    restaurants.latitude,
+    restaurants.longitude,
+    filters.latitude,
+    filters.longitude
+  );
+
+  if (distanceExpr && filters.distanceKm !== null) {
+    whereConditions.push(isNotNull(restaurants.latitude));
+    whereConditions.push(isNotNull(restaurants.longitude));
+    whereConditions.push(sql`${distanceExpr} <= ${filters.distanceKm}`);
+  }
+
+  const offset = (filters.page - 1) * filters.limit;
+
+  let orderByClause;
+  if (filters.sortBy === "rating") {
+    orderByClause =
+      filters.sortOrder === "asc" ? asc(restaurants.ratingAvg) : desc(restaurants.ratingAvg);
+  } else if (filters.sortBy === "distance" && distanceExpr) {
+    orderByClause = filters.sortOrder === "desc" ? desc(distanceExpr) : asc(distanceExpr);
+  } else {
+    orderByClause = filters.sortOrder === "asc" ? asc(deals.createdAt) : desc(deals.createdAt);
+  }
+
+  const selection = {
+    id: deals.id,
+    title: deals.title,
+    description: deals.description,
+    status: deals.status,
+    startDate: deals.startDate,
+    endDate: deals.endDate,
+    createdAt: deals.createdAt,
+    restaurant: {
+      id: restaurants.id,
+      name: restaurants.name,
+      streetAddress: restaurants.streetAddress,
+      city: restaurants.city,
+      province: restaurants.province,
+      latitude: restaurants.latitude,
+      longitude: restaurants.longitude,
+      ratingAvg: restaurants.ratingAvg,
+      ratingCount: restaurants.ratingCount,
+    },
+    partner: {
+      id: partners.id,
+      businessName: partners.businessName,
+    },
+    distanceKm: distanceExpr ?? sql<number | null>`NULL`,
+  };
+
+  const dealRows = await db
+    .select(selection)
+    .from(deals)
+    .innerJoin(restaurants, eq(deals.restaurantId, restaurants.id))
+    .innerJoin(partners, eq(deals.partnerId, partners.id))
+    .where(and(...whereConditions))
+    .orderBy(orderByClause)
+    .limit(filters.limit)
+    .offset(offset);
+
+  const totalCountResult = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(deals)
+    .innerJoin(restaurants, eq(deals.restaurantId, restaurants.id))
+    .where(and(...whereConditions));
+  const totalCount = totalCountResult[0]?.count ?? 0;
+  const totalPages = Math.max(1, Math.ceil(totalCount / filters.limit));
+
+  const dealIds = dealRows.map((deal) => deal.id);
+
+  const cuisinesByDeal = new Map<number, Array<{ id: number; name: string }>>();
+  const dietaryByDeal = new Map<number, Array<{ id: number; name: string }>>();
+
+  if (dealIds.length > 0) {
+    const cuisineRows = await db
+      .select({
+        dealId: dealCuisines.dealId,
+        cuisineId: cuisines.id,
+        cuisineName: cuisines.name,
+      })
+      .from(dealCuisines)
+      .innerJoin(cuisines, eq(dealCuisines.cuisineId, cuisines.id))
+      .where(inArray(dealCuisines.dealId, dealIds));
+
+    cuisineRows.forEach((row) => {
+      if (!cuisinesByDeal.has(row.dealId)) {
+        cuisinesByDeal.set(row.dealId, []);
+      }
+      cuisinesByDeal.get(row.dealId)!.push({ id: row.cuisineId, name: row.cuisineName });
+    });
+
+    const dietaryRows = await db
+      .select({
+        dealId: dealDietaryPreferences.dealId,
+        dietaryId: dietaryPreferences.id,
+        dietaryName: dietaryPreferences.name,
+      })
+      .from(dealDietaryPreferences)
+      .innerJoin(
+        dietaryPreferences,
+        eq(dealDietaryPreferences.dietaryPreferenceId, dietaryPreferences.id)
+      )
+      .where(inArray(dealDietaryPreferences.dealId, dealIds));
+
+    dietaryRows.forEach((row) => {
+      if (!dietaryByDeal.has(row.dealId)) {
+        dietaryByDeal.set(row.dealId, []);
+      }
+      dietaryByDeal.get(row.dealId)!.push({ id: row.dietaryId, name: row.dietaryName });
+    });
+  }
+
+  let bookmarkedDealIds: number[] = [];
+  if (userId && dealIds.length > 0) {
+    const favorites = await db
+      .select({ dealId: userFavoriteDeals.dealId })
+      .from(userFavoriteDeals)
+      .where(and(eq(userFavoriteDeals.userId, userId), inArray(userFavoriteDeals.dealId, dealIds)));
+    bookmarkedDealIds = favorites.map((favorite) => favorite.dealId);
+  }
+
+  return {
+    items: dealRows.map((deal) => ({
+      ...deal,
+      cuisines: cuisinesByDeal.get(deal.id) ?? [],
+      dietaryPreferences: dietaryByDeal.get(deal.id) ?? [],
+      isBookmarked: bookmarkedDealIds.includes(deal.id),
+    })),
+    pagination: {
+      currentPage: filters.page,
+      totalPages,
+      totalCount,
+      hasNextPage: filters.page < totalPages,
+      hasPreviousPage: filters.page > 1,
+    },
+  };
+};
+
+router.get("/", optionalAuth, async (req: Request, res: Response) => {
+  const rawFilters = parseSearchFilters(req);
+
+  if ((rawFilters.latitude === null) !== (rawFilters.longitude === null)) {
     return ResponseHelper.badRequest(
       res,
       "Both latitude and longitude are required for location-based search"
     );
   }
 
-  if (userLat !== null && (userLat < -90 || userLat > 90)) {
+  if (rawFilters.latitude !== null && (rawFilters.latitude < -90 || rawFilters.latitude > 90)) {
     return ResponseHelper.badRequest(res, "Latitude must be between -90 and 90");
   }
 
-  if (userLng !== null && (userLng < -180 || userLng > 180)) {
+  if (
+    rawFilters.longitude !== null &&
+    (rawFilters.longitude < -180 || rawFilters.longitude > 180)
+  ) {
     return ResponseHelper.badRequest(res, "Longitude must be between -180 and 180");
   }
 
+  if (rawFilters.distanceKm !== null && rawFilters.latitude === null) {
+    return ResponseHelper.badRequest(
+      res,
+      "Distance filtering requires both latitude and longitude"
+    );
+  }
+
+  const filters = await hydrateSearchFilters(rawFilters);
+  const userId = (req as Request & { userId?: string }).userId;
+
+  const includeRestaurants = filters.showType !== "deals";
+  const includeDeals = filters.showType !== "restaurants";
+
   const result = await DbHelper.executeWithErrorHandling(
     async () => {
-      // Build the base query conditions
-      const whereConditions: import("drizzle-orm").SQLWrapper[] = [eq(restaurants.isActive, true)];
-
-      // Add search query filter
-      if (searchQuery) {
-        const searchTerm = `%${searchQuery}%`;
-        const searchCondition = or(
-          like(restaurants.name, searchTerm),
-          like(partners.businessName, searchTerm),
-          like(restaurants.description, searchTerm)
-        );
-        if (searchCondition) {
-          whereConditions.push(searchCondition);
-        }
-      }
-
-      // Add cuisine filter
-      let cuisineRestaurantIds: number[] | null = null;
-      if (cuisine) {
-        console.log("Filtering by cuisine:", cuisine);
-        const cuisineId = await db
-          .select({ id: cuisines.id })
-          .from(cuisines)
-          .where(like(cuisines.name, `%${cuisine}%`))
-          .limit(1);
-
-        console.log("Found cuisine ID:", cuisineId);
-
-        if (cuisineId.length > 0 && cuisineId[0]?.id !== undefined) {
-          const restaurantsWithCuisine = await db
-            .select({ restaurantId: deals.restaurantId })
-            .from(deals)
-            .innerJoin(dealCuisines, eq(deals.id, dealCuisines.dealId))
-            .where(and(eq(dealCuisines.cuisineId, cuisineId[0].id), eq(deals.status, "active")));
-
-          cuisineRestaurantIds = [...new Set(restaurantsWithCuisine.map((r) => r.restaurantId))];
-          console.log("Restaurants with cuisine:", cuisineRestaurantIds);
-
-          if (cuisineRestaurantIds.length === 0) {
-            // No restaurants found with this cuisine
-            return {
-              restaurants: [],
-              searchParams: {
-                query: searchQuery || null,
-                cuisine: cuisine || null,
-                location:
-                  userLat !== null && userLng !== null
-                    ? { latitude: userLat, longitude: userLng, radius }
-                    : null,
-                sortBy: sortBy || "relevance",
-                sortOrder: sortOrder || "asc",
-              },
-              pagination: {
-                currentPage: page,
-                totalPages: 1,
-                totalCount: 0,
-                hasNextPage: false,
-                hasPreviousPage: false,
-              },
-            };
-          }
-        }
-      }
-
-      // Add dietary preference filter
-      let dietaryRestaurantIds: number[] | null = null;
-      if (dietaryPreference) {
-        console.log("Filtering by dietary preference:", dietaryPreference);
-        const dietPrefId = await db
-          .select({ id: dietaryPreferences.id })
-          .from(dietaryPreferences)
-          .where(like(dietaryPreferences.name, `%${dietaryPreference}%`))
-          .limit(1);
-
-        console.log("Found dietary preference ID:", dietPrefId);
-
-        if (dietPrefId.length > 0 && dietPrefId[0]?.id !== undefined) {
-          const restaurantsWithDietPref = await db
-            .select({ restaurantId: deals.restaurantId })
-            .from(deals)
-            .innerJoin(dealDietaryPreferences, eq(deals.id, dealDietaryPreferences.dealId))
-            .where(
-              and(
-                eq(dealDietaryPreferences.dietaryPreferenceId, dietPrefId[0].id),
-                eq(deals.status, "active")
-              )
-            );
-
-          dietaryRestaurantIds = [...new Set(restaurantsWithDietPref.map((r) => r.restaurantId))];
-          console.log("Restaurants with dietary preference:", dietaryRestaurantIds);
-
-          if (dietaryRestaurantIds.length === 0) {
-            // No restaurants found with this dietary preference
-            return {
-              restaurants: [],
-              searchParams: {
-                query: searchQuery || null,
-                cuisine: cuisine || null,
-                dietaryPreference: dietaryPreference || null,
-                location:
-                  userLat !== null && userLng !== null
-                    ? { latitude: userLat, longitude: userLng, radius }
-                    : null,
-                sortBy: sortBy || "relevance",
-                sortOrder: sortOrder || "asc",
-              },
-              pagination: {
-                currentPage: page,
-                totalPages: 1,
-                totalCount: 0,
-                hasNextPage: false,
-                hasPreviousPage: false,
-              },
-            };
-          }
-        }
-      }
-
-      // Combine cuisine and dietary filters with AND logic
-      // If both filters are active, only include restaurants that match BOTH
-      if (cuisineRestaurantIds !== null && dietaryRestaurantIds !== null) {
-        console.log("Applying AND logic between cuisine and dietary filters");
-        const intersectedIds = cuisineRestaurantIds.filter((id) =>
-          dietaryRestaurantIds!.includes(id)
-        );
-        console.log("Restaurants matching both filters:", intersectedIds.length, "restaurants");
-
-        if (intersectedIds.length > 0) {
-          whereConditions.push(inArray(restaurants.id, intersectedIds));
-        } else {
-          // No restaurants match both filters
-          return {
-            restaurants: [],
-            searchParams: {
-              query: searchQuery || null,
-              cuisine: cuisine || null,
-              dietaryPreference: dietaryPreference || null,
-              location:
-                userLat !== null && userLng !== null
-                  ? { latitude: userLat, longitude: userLng, radius }
-                  : null,
-              sortBy: sortBy || "relevance",
-              sortOrder: sortOrder || "asc",
-            },
-            pagination: {
-              currentPage: page,
-              totalPages: 1,
-              totalCount: 0,
-              hasNextPage: false,
-              hasPreviousPage: false,
-            },
-          };
-        }
-      } else if (cuisineRestaurantIds !== null) {
-        // Only cuisine filter is active
-        whereConditions.push(inArray(restaurants.id, cuisineRestaurantIds));
-      } else if (dietaryRestaurantIds !== null) {
-        // Only dietary filter is active
-        whereConditions.push(inArray(restaurants.id, dietaryRestaurantIds));
-      }
-
-      // Add active deals filter
-      if (hasActiveDeals === "true") {
-        const dealsSubquery = db
-          .select({ restaurantId: deals.restaurantId })
-          .from(deals)
-          .where(eq(deals.status, "active"));
-
-        const restaurantIdsWithActiveDeals = await dealsSubquery;
-        const activeRestaurantIds = restaurantIdsWithActiveDeals.map((d) => d.restaurantId);
-
-        if (activeRestaurantIds.length > 0) {
-          whereConditions.push(inArray(restaurants.id, activeRestaurantIds));
-        } else {
-          // No restaurants with active deals
-          return {
-            restaurants: [],
-            searchParams: {
-              query: searchQuery || null,
-              cuisine: cuisine || null,
-              location:
-                userLat !== null && userLng !== null
-                  ? { latitude: userLat, longitude: userLng, radius }
-                  : null,
-              sortBy: sortBy || "relevance",
-              sortOrder: sortOrder || "asc",
-            },
-            pagination: {
-              currentPage: page,
-              totalPages: 1,
-              totalCount: 0,
-              hasNextPage: false,
-              hasPreviousPage: false,
-            },
-          };
-        }
-      }
-
-      // Determine sort order
-      const validSortByFields = ["name", "ratingAvg", "distance", "createdAt", "relevance"];
-      const validSortOrders = ["asc", "desc"];
-      const actualSortBy = validSortByFields.includes(sortBy as string)
-        ? (sortBy as string)
-        : "relevance";
-      const actualSortOrder = validSortOrders.includes(sortOrder as string)
-        ? (sortOrder as string)
-        : "asc";
-
-      // Get restaurant results with sorting
-      let orderByClause;
-      if (actualSortBy === "name") {
-        orderByClause = actualSortOrder === "desc" ? desc(restaurants.name) : asc(restaurants.name);
-      } else if (actualSortBy === "ratingAvg") {
-        orderByClause =
-          actualSortOrder === "desc" ? desc(restaurants.ratingAvg) : asc(restaurants.ratingAvg);
-      } else if (actualSortBy === "createdAt") {
-        orderByClause =
-          actualSortOrder === "desc" ? desc(restaurants.createdAt) : asc(restaurants.createdAt);
-      } else {
-        // Default relevance sorting (created date desc)
-        orderByClause = desc(restaurants.createdAt);
-      }
-
-      const searchResults = await db
-        .select({
-          id: restaurants.id,
-          name: restaurants.name,
-          description: restaurants.description,
-          streetAddress: restaurants.streetAddress,
-          city: restaurants.city,
-          province: restaurants.province,
-          latitude: restaurants.latitude,
-          longitude: restaurants.longitude,
-          ratingAvg: restaurants.ratingAvg,
-          ratingCount: restaurants.ratingCount,
-          openingTime: restaurants.openingTime,
-          closingTime: restaurants.closingTime,
-          createdAt: restaurants.createdAt,
-          partner: {
-            businessName: partners.businessName,
-          },
-        })
-        .from(restaurants)
-        .innerJoin(partners, eq(restaurants.partnerId, partners.id))
-        .where(and(...whereConditions))
-        .orderBy(orderByClause)
-        .limit(limit)
-        .offset(offset);
-
-      // Apply distance filtering if location provided
-      let filteredResults = searchResults;
-      if (userLat !== null && userLng !== null) {
-        console.log(
-          "Applying distance filter. User location:",
-          { userLat, userLng },
-          "Radius:",
-          radius
-        );
-        console.log("Results before distance filter:", searchResults.length);
-
-        // Log all restaurant locations
-        console.log("All restaurants in database:");
-        searchResults.forEach((restaurant) => {
-          console.log(`  - ${restaurant.name}: (${restaurant.latitude}, ${restaurant.longitude})`);
-        });
-
-        filteredResults = searchResults.filter((restaurant) => {
-          if (!restaurant.latitude || !restaurant.longitude) return false;
-
-          // Haversine formula for accurate distance calculation
-          const toRad = (value: number) => (value * Math.PI) / 180;
-          const R = 6371; // Earth's radius in km
-
-          const dLat = toRad(restaurant.latitude - userLat);
-          const dLon = toRad(restaurant.longitude - userLng);
-
-          const a =
-            Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-            Math.cos(toRad(userLat)) *
-              Math.cos(toRad(restaurant.latitude)) *
-              Math.sin(dLon / 2) *
-              Math.sin(dLon / 2);
-
-          const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-          const distance = R * c; // Distance in km
-
-          console.log(
-            `Restaurant ${restaurant.name} at distance ${distance.toFixed(2)}km (limit: ${radius}km)${distance <= radius ? " ✓ INCLUDED" : " ✗ FILTERED OUT"}`
-          );
-          return distance <= radius;
-        });
-
-        console.log("Results after distance filter:", filteredResults.length);
-
-        // Sort by distance if requested
-        if (actualSortBy === "distance") {
-          filteredResults.sort((a, b) => {
-            const toRad = (value: number) => (value * Math.PI) / 180;
-            const R = 6371;
-
-            // Calculate distance A
-            const dLatA = toRad((a.latitude || 0) - userLat);
-            const dLonA = toRad((a.longitude || 0) - userLng);
-            const aA =
-              Math.sin(dLatA / 2) * Math.sin(dLatA / 2) +
-              Math.cos(toRad(userLat)) *
-                Math.cos(toRad(a.latitude || 0)) *
-                Math.sin(dLonA / 2) *
-                Math.sin(dLonA / 2);
-            const cA = 2 * Math.atan2(Math.sqrt(aA), Math.sqrt(1 - aA));
-            const distanceA = R * cA;
-
-            // Calculate distance B
-            const dLatB = toRad((b.latitude || 0) - userLat);
-            const dLonB = toRad((b.longitude || 0) - userLng);
-            const aB =
-              Math.sin(dLatB / 2) * Math.sin(dLatB / 2) +
-              Math.cos(toRad(userLat)) *
-                Math.cos(toRad(b.latitude || 0)) *
-                Math.sin(dLonB / 2) *
-                Math.sin(dLonB / 2);
-            const cB = 2 * Math.atan2(Math.sqrt(aB), Math.sqrt(1 - aB));
-            const distanceB = R * cB;
-
-            return actualSortOrder === "desc" ? distanceB - distanceA : distanceA - distanceB;
-          });
-        }
-      }
-
-      // Get active deals for these restaurants
-      const restaurantIds = filteredResults.map((r) => r.id);
-      let dealsForRestaurants: {
-        id: number;
-        title: string;
-        description: string | null;
-        restaurantId: number;
-      }[] = [];
-
-      if (restaurantIds.length > 0) {
-        dealsForRestaurants = await db
-          .select({
-            id: deals.id,
-            title: deals.title,
-            description: deals.description,
-            restaurantId: deals.restaurantId,
-          })
-          .from(deals)
-          .where(and(inArray(deals.restaurantId, restaurantIds), eq(deals.status, "active")));
-      }
-
-      // Get bookmark status for authenticated users
-      const userId = (req as Request & { userId?: string }).userId;
-      let bookmarkedRestaurants: number[] = [];
-
-      if (userId && restaurantIds.length > 0) {
-        const bookmarks = await db
-          .select({ restaurantId: userFavoriteRestaurants.restaurantId })
-          .from(userFavoriteRestaurants)
-          .where(
-            and(
-              eq(userFavoriteRestaurants.userId, userId),
-              inArray(userFavoriteRestaurants.restaurantId, restaurantIds)
-            )
-          );
-
-        bookmarkedRestaurants = bookmarks.map((b) => b.restaurantId);
-      }
-
-      // Map deals and bookmarks to restaurants
-      const resultsWithDeals = filteredResults.map((restaurant) => {
-        const restaurantDeals = dealsForRestaurants.filter(
-          (deal) => deal.restaurantId === restaurant.id
-        );
-
-        return {
-          ...restaurant,
-          activeDeals: restaurantDeals,
-          isBookmarked: bookmarkedRestaurants.includes(restaurant.id),
-          ...(userLat !== null && userLng !== null && restaurant.latitude && restaurant.longitude
-            ? {
-                distance:
-                  Math.sqrt(
-                    Math.pow(restaurant.latitude - userLat, 2) +
-                      Math.pow(restaurant.longitude - userLng, 2)
-                  ) * 111, // Rough conversion to km
-              }
-            : {}),
-        };
-      });
-
-      // Calculate pagination info (simplified - in production you'd want a proper count query)
-      const totalPages = Math.ceil(searchResults.length / limit);
+      const [restaurantResult, dealResult] = await Promise.all([
+        includeRestaurants
+          ? getRestaurantSearchResults(filters, userId)
+          : Promise.resolve(createEmptyResult(filters)),
+        includeDeals
+          ? getDealSearchResults(filters, userId)
+          : Promise.resolve(createEmptyResult(filters)),
+      ]);
 
       return {
-        restaurants: resultsWithDeals,
-        searchParams: {
-          query: searchQuery || null,
-          cuisine: cuisine || null,
-          location:
-            userLat !== null && userLng !== null
-              ? { latitude: userLat, longitude: userLng, radius }
-              : null,
-          sortBy: actualSortBy,
-          sortOrder: actualSortOrder,
-        },
+        restaurants: restaurantResult.items,
+        deals: dealResult.items,
         pagination: {
-          currentPage: page,
-          totalPages: Math.max(totalPages, 1),
-          totalCount: searchResults.length, // Simplified count
-          hasNextPage: searchResults.length === limit,
-          hasPreviousPage: page > 1,
+          restaurants: restaurantResult.pagination,
+          deals: dealResult.pagination,
         },
+        filtersApplied: {
+          query: filters.query,
+          showType: filters.showType,
+          cuisineIds: filters.cuisineIds,
+          dietaryPreferenceIds: filters.dietaryPreferenceIds,
+          latitude: filters.latitude,
+          longitude: filters.longitude,
+          distanceKm: filters.distanceKm,
+          sortBy: filters.sortBy,
+          sortOrder: filters.sortOrder,
+        },
+      };
+    },
+    res,
+    "Failed to search"
+  );
+
+  if (result) {
+    ResponseHelper.success(res, result);
+  }
+});
+
+router.get("/restaurants", optionalAuth, async (req: Request, res: Response) => {
+  const rawFilters = parseSearchFilters(req);
+  rawFilters.showType = "restaurants";
+
+  if ((rawFilters.latitude === null) !== (rawFilters.longitude === null)) {
+    return ResponseHelper.badRequest(
+      res,
+      "Both latitude and longitude are required for location-based search"
+    );
+  }
+
+  if (rawFilters.latitude !== null && (rawFilters.latitude < -90 || rawFilters.latitude > 90)) {
+    return ResponseHelper.badRequest(res, "Latitude must be between -90 and 90");
+  }
+
+  if (
+    rawFilters.longitude !== null &&
+    (rawFilters.longitude < -180 || rawFilters.longitude > 180)
+  ) {
+    return ResponseHelper.badRequest(res, "Longitude must be between -180 and 180");
+  }
+
+  if (rawFilters.distanceKm !== null && rawFilters.latitude === null) {
+    return ResponseHelper.badRequest(
+      res,
+      "Distance filtering requires both latitude and longitude"
+    );
+  }
+
+  const filters = await hydrateSearchFilters(rawFilters);
+  const userId = (req as Request & { userId?: string }).userId;
+
+  const result = await DbHelper.executeWithErrorHandling(
+    async () => {
+      const restaurantResult = await getRestaurantSearchResults(filters, userId);
+
+      return {
+        restaurants: restaurantResult.items,
+        searchParams: {
+          query: filters.query,
+          cuisineIds: filters.cuisineIds,
+          dietaryPreferenceIds: filters.dietaryPreferenceIds,
+          location:
+            filters.latitude !== null && filters.longitude !== null
+              ? {
+                  latitude: filters.latitude,
+                  longitude: filters.longitude,
+                  radius: filters.distanceKm,
+                }
+              : null,
+          sortBy: filters.sortBy,
+          sortOrder: filters.sortOrder,
+        },
+        pagination: restaurantResult.pagination,
       };
     },
     res,
