@@ -410,7 +410,7 @@ const getRestaurantSearchResults = async (
     distanceKm: distanceExpr ?? sql<number | null>`NULL`,
   };
 
-  const restaurantRows = await db
+  const restaurantQuery = db
     .select(selection)
     .from(restaurants)
     .innerJoin(partners, eq(restaurants.partnerId, partners.id))
@@ -419,11 +419,13 @@ const getRestaurantSearchResults = async (
     .limit(filters.limit)
     .offset(offset);
 
-  const totalCountResult = await db
+  const totalCountQuery = db
     .select({ count: sql<number>`count(*)` })
     .from(restaurants)
     .innerJoin(partners, eq(restaurants.partnerId, partners.id))
     .where(and(...whereConditions));
+
+  const [restaurantRows, totalCountResult] = await Promise.all([restaurantQuery, totalCountQuery]);
   const totalCount = totalCountResult[0]?.count ?? 0;
   const totalPages = Math.max(1, Math.ceil(totalCount / filters.limit));
 
@@ -440,8 +442,9 @@ const getRestaurantSearchResults = async (
       dietaryPreferences: Array<{ id: number; name: string }>;
     }>
   >();
+  let bookmarkedRestaurantIds: number[] = [];
   if (restaurantIds.length > 0) {
-    const activeDealsRows = await db
+    const activeDealsPromise = db
       .select({
         id: deals.id,
         title: deals.title,
@@ -451,13 +454,28 @@ const getRestaurantSearchResults = async (
       .from(deals)
       .where(and(inArray(deals.restaurantId, restaurantIds), eq(deals.status, "active")));
 
+    const bookmarksPromise = userId
+      ? db
+          .select({ restaurantId: userFavoriteRestaurants.restaurantId })
+          .from(userFavoriteRestaurants)
+          .where(
+            and(
+              eq(userFavoriteRestaurants.userId, userId),
+              inArray(userFavoriteRestaurants.restaurantId, restaurantIds)
+            )
+          )
+      : Promise.resolve([]);
+
+    const [activeDealsRows, bookmarks] = await Promise.all([activeDealsPromise, bookmarksPromise]);
+    bookmarkedRestaurantIds = bookmarks.map((bookmark) => bookmark.restaurantId);
+
     const activeDealIds = activeDealsRows.map((dealRow) => dealRow.id);
 
     const cuisinesByDeal = new Map<number, Array<{ id: number; name: string }>>();
     const dietaryByDeal = new Map<number, Array<{ id: number; name: string }>>();
 
     if (activeDealIds.length > 0) {
-      const cuisineRows = await db
+      const cuisineQuery = db
         .select({
           dealId: dealCuisines.dealId,
           id: cuisines.id,
@@ -467,14 +485,7 @@ const getRestaurantSearchResults = async (
         .innerJoin(cuisines, eq(dealCuisines.cuisineId, cuisines.id))
         .where(inArray(dealCuisines.dealId, activeDealIds));
 
-      cuisineRows.forEach((row) => {
-        if (!cuisinesByDeal.has(row.dealId)) {
-          cuisinesByDeal.set(row.dealId, []);
-        }
-        cuisinesByDeal.get(row.dealId)!.push({ id: row.id, name: row.name });
-      });
-
-      const dietaryRows = await db
+      const dietaryQuery = db
         .select({
           dealId: dealDietaryPreferences.dealId,
           id: dietaryPreferences.id,
@@ -486,6 +497,15 @@ const getRestaurantSearchResults = async (
           eq(dealDietaryPreferences.dietaryPreferenceId, dietaryPreferences.id)
         )
         .where(inArray(dealDietaryPreferences.dealId, activeDealIds));
+
+      const [cuisineRows, dietaryRows] = await Promise.all([cuisineQuery, dietaryQuery]);
+
+      cuisineRows.forEach((row) => {
+        if (!cuisinesByDeal.has(row.dealId)) {
+          cuisinesByDeal.set(row.dealId, []);
+        }
+        cuisinesByDeal.get(row.dealId)!.push({ id: row.id, name: row.name });
+      });
 
       dietaryRows.forEach((row) => {
         if (!dietaryByDeal.has(row.dealId)) {
@@ -505,20 +525,6 @@ const getRestaurantSearchResults = async (
         dietaryPreferences: dietaryByDeal.get(dealRow.id) ?? [],
       });
     });
-  }
-
-  let bookmarkedRestaurantIds: number[] = [];
-  if (userId && restaurantIds.length > 0) {
-    const bookmarks = await db
-      .select({ restaurantId: userFavoriteRestaurants.restaurantId })
-      .from(userFavoriteRestaurants)
-      .where(
-        and(
-          eq(userFavoriteRestaurants.userId, userId),
-          inArray(userFavoriteRestaurants.restaurantId, restaurantIds)
-        )
-      );
-    bookmarkedRestaurantIds = bookmarks.map((bookmark) => bookmark.restaurantId);
   }
 
   return {
@@ -637,7 +643,7 @@ const getDealSearchResults = async (
     distanceKm: distanceExpr ?? sql<number | null>`NULL`,
   };
 
-  const dealRows = await db
+  const dealQuery = db
     .select(selection)
     .from(deals)
     .innerJoin(restaurants, eq(deals.restaurantId, restaurants.id))
@@ -647,11 +653,13 @@ const getDealSearchResults = async (
     .limit(filters.limit)
     .offset(offset);
 
-  const totalCountResult = await db
+  const dealCountQuery = db
     .select({ count: sql<number>`count(*)` })
     .from(deals)
     .innerJoin(restaurants, eq(deals.restaurantId, restaurants.id))
     .where(and(...whereConditions));
+
+  const [dealRows, totalCountResult] = await Promise.all([dealQuery, dealCountQuery]);
   const totalCount = totalCountResult[0]?.count ?? 0;
   const totalPages = Math.max(1, Math.ceil(totalCount / filters.limit));
 
@@ -660,8 +668,9 @@ const getDealSearchResults = async (
   const cuisinesByDeal = new Map<number, Array<{ id: number; name: string }>>();
   const dietaryByDeal = new Map<number, Array<{ id: number; name: string }>>();
 
+  let bookmarkedDealIds: number[] = [];
   if (dealIds.length > 0) {
-    const cuisineRows = await db
+    const cuisineQuery = db
       .select({
         dealId: dealCuisines.dealId,
         cuisineId: cuisines.id,
@@ -671,14 +680,7 @@ const getDealSearchResults = async (
       .innerJoin(cuisines, eq(dealCuisines.cuisineId, cuisines.id))
       .where(inArray(dealCuisines.dealId, dealIds));
 
-    cuisineRows.forEach((row) => {
-      if (!cuisinesByDeal.has(row.dealId)) {
-        cuisinesByDeal.set(row.dealId, []);
-      }
-      cuisinesByDeal.get(row.dealId)!.push({ id: row.cuisineId, name: row.cuisineName });
-    });
-
-    const dietaryRows = await db
+    const dietaryQuery = db
       .select({
         dealId: dealDietaryPreferences.dealId,
         dietaryId: dietaryPreferences.id,
@@ -691,20 +693,35 @@ const getDealSearchResults = async (
       )
       .where(inArray(dealDietaryPreferences.dealId, dealIds));
 
+    const favoritesPromise = userId
+      ? db
+          .select({ dealId: userFavoriteDeals.dealId })
+          .from(userFavoriteDeals)
+          .where(
+            and(eq(userFavoriteDeals.userId, userId), inArray(userFavoriteDeals.dealId, dealIds))
+          )
+      : Promise.resolve([]);
+
+    const [cuisineRows, dietaryRows, favorites] = await Promise.all([
+      cuisineQuery,
+      dietaryQuery,
+      favoritesPromise,
+    ]);
+
+    cuisineRows.forEach((row) => {
+      if (!cuisinesByDeal.has(row.dealId)) {
+        cuisinesByDeal.set(row.dealId, []);
+      }
+      cuisinesByDeal.get(row.dealId)!.push({ id: row.cuisineId, name: row.cuisineName });
+    });
+
     dietaryRows.forEach((row) => {
       if (!dietaryByDeal.has(row.dealId)) {
         dietaryByDeal.set(row.dealId, []);
       }
       dietaryByDeal.get(row.dealId)!.push({ id: row.dietaryId, name: row.dietaryName });
     });
-  }
 
-  let bookmarkedDealIds: number[] = [];
-  if (userId && dealIds.length > 0) {
-    const favorites = await db
-      .select({ dealId: userFavoriteDeals.dealId })
-      .from(userFavoriteDeals)
-      .where(and(eq(userFavoriteDeals.userId, userId), inArray(userFavoriteDeals.dealId, dealIds)));
     bookmarkedDealIds = favorites.map((favorite) => favorite.dealId);
   }
 

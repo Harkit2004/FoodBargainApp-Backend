@@ -13,8 +13,10 @@ import {
   date,
   smallint,
   pgEnum,
+  index,
+  uniqueIndex,
 } from "drizzle-orm/pg-core";
-import { relations } from "drizzle-orm";
+import { relations, sql } from "drizzle-orm";
 
 // Enums
 export const dealStatusEnum = pgEnum("deal_status", ["draft", "active", "expired", "archived"]);
@@ -37,44 +39,59 @@ export const users = pgTable("users", {
 });
 
 // 2. Partners table
-export const partners = pgTable("partners", {
-  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
-  userId: uuid("user_id")
-    .notNull()
-    .unique()
-    .references(() => users.id),
-  businessName: varchar("business_name").notNull(),
-  streetAddress: varchar("street_address"),
-  city: varchar("city"),
-  province: varchar("province"),
-  postalCode: varchar("postal_code"),
-  phone: varchar("phone"),
-  createdAt: timestamp("created_at").defaultNow(),
-  updatedAt: timestamp("updated_at").defaultNow(),
-});
+export const partners = pgTable(
+  "partners",
+  {
+    id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+    userId: uuid("user_id")
+      .notNull()
+      .unique()
+      .references(() => users.id),
+    businessName: varchar("business_name").notNull(),
+    streetAddress: varchar("street_address"),
+    city: varchar("city"),
+    province: varchar("province"),
+    postalCode: varchar("postal_code"),
+    phone: varchar("phone"),
+    createdAt: timestamp("created_at").defaultNow(),
+    updatedAt: timestamp("updated_at").defaultNow(),
+  },
+  (table) => [
+    index("idx_partners_business_name_trgm").using("gin", sql`${table.businessName} gin_trgm_ops`),
+  ]
+);
 
 // 3. Restaurants table
-export const restaurants = pgTable("restaurants", {
-  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
-  partnerId: bigint("partner_id", { mode: "number" }).references(() => partners.id),
-  name: varchar("name").notNull(),
-  description: text("description"),
-  streetAddress: varchar("street_address"),
-  city: varchar("city"),
-  province: varchar("province"),
-  postalCode: varchar("postal_code"),
-  phone: varchar("phone"),
-  imageUrl: varchar("image_url"),
-  ratingAvg: decimal("rating_avg", { precision: 3, scale: 2 }).default("0.0"),
-  ratingCount: integer("rating_count").default(0),
-  latitude: doublePrecision("latitude"),
-  longitude: doublePrecision("longitude"),
-  openingTime: time("opening_time"),
-  closingTime: time("closing_time"),
-  isActive: boolean("is_active").default(true),
-  createdAt: timestamp("created_at").defaultNow(),
-  updatedAt: timestamp("updated_at").defaultNow(),
-});
+export const restaurants = pgTable(
+  "restaurants",
+  {
+    id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+    partnerId: bigint("partner_id", { mode: "number" }).references(() => partners.id),
+    name: varchar("name").notNull(),
+    description: text("description"),
+    streetAddress: varchar("street_address"),
+    city: varchar("city"),
+    province: varchar("province"),
+    postalCode: varchar("postal_code"),
+    phone: varchar("phone"),
+    imageUrl: varchar("image_url"),
+    ratingAvg: decimal("rating_avg", { precision: 3, scale: 2 }).default("0.0"),
+    ratingCount: integer("rating_count").default(0),
+    latitude: doublePrecision("latitude"),
+    longitude: doublePrecision("longitude"),
+    openingTime: time("opening_time"),
+    closingTime: time("closing_time"),
+    isActive: boolean("is_active").default(true),
+    createdAt: timestamp("created_at").defaultNow(),
+    updatedAt: timestamp("updated_at").defaultNow(),
+  },
+  (table) => [
+    index("idx_restaurants_name_trgm").using("gin", sql`${table.name} gin_trgm_ops`),
+    index("idx_restaurants_description_trgm").using("gin", sql`${table.description} gin_trgm_ops`),
+    index("idx_restaurants_active_created_at").on(table.isActive, table.createdAt),
+    index("idx_restaurants_location").on(table.latitude, table.longitude),
+  ]
+);
 
 // 4. Menu sections table
 export const menuSections = pgTable("menu_sections", {
@@ -107,22 +124,31 @@ export const menuItems = pgTable("menu_items", {
 });
 
 // 6. Deals table
-export const deals = pgTable("deals", {
-  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
-  title: varchar("title").notNull(),
-  description: text("description"),
-  partnerId: bigint("partner_id", { mode: "number" })
-    .notNull()
-    .references(() => partners.id),
-  restaurantId: bigint("restaurant_id", { mode: "number" })
-    .notNull()
-    .references(() => restaurants.id),
-  status: dealStatusEnum("status").notNull().default("draft"),
-  startDate: date("start_date").notNull(),
-  endDate: date("end_date").notNull(),
-  createdAt: timestamp("created_at").defaultNow(),
-  updatedAt: timestamp("updated_at").defaultNow(),
-});
+export const deals = pgTable(
+  "deals",
+  {
+    id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+    title: varchar("title").notNull(),
+    description: text("description"),
+    partnerId: bigint("partner_id", { mode: "number" })
+      .notNull()
+      .references(() => partners.id),
+    restaurantId: bigint("restaurant_id", { mode: "number" })
+      .notNull()
+      .references(() => restaurants.id),
+    status: dealStatusEnum("status").notNull().default("draft"),
+    startDate: date("start_date").notNull(),
+    endDate: date("end_date").notNull(),
+    createdAt: timestamp("created_at").defaultNow(),
+    updatedAt: timestamp("updated_at").defaultNow(),
+  },
+  (table) => [
+    index("idx_deals_title_trgm").using("gin", sql`${table.title} gin_trgm_ops`),
+    index("idx_deals_description_trgm").using("gin", sql`${table.description} gin_trgm_ops`),
+    index("idx_deals_status_created_at").on(table.status, table.createdAt),
+    index("idx_deals_restaurant_status").on(table.restaurantId, table.status),
+  ]
+);
 
 // 7. Cuisines table
 export const cuisines = pgTable("cuisines", {
@@ -137,51 +163,79 @@ export const dietaryPreferences = pgTable("dietary_preferences", {
 });
 
 // 9. Deal cuisines junction table
-export const dealCuisines = pgTable("deal_cuisines", {
-  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
-  dealId: bigint("deal_id", { mode: "number" })
-    .notNull()
-    .references(() => deals.id),
-  cuisineId: bigint("cuisine_id", { mode: "number" })
-    .notNull()
-    .references(() => cuisines.id),
-});
+export const dealCuisines = pgTable(
+  "deal_cuisines",
+  {
+    id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+    dealId: bigint("deal_id", { mode: "number" })
+      .notNull()
+      .references(() => deals.id),
+    cuisineId: bigint("cuisine_id", { mode: "number" })
+      .notNull()
+      .references(() => cuisines.id),
+  },
+  (table) => [
+    index("idx_deal_cuisines_deal_id").on(table.dealId),
+    uniqueIndex("uniq_deal_cuisine_pair").on(table.dealId, table.cuisineId),
+  ]
+);
 
 // 10. Deal dietary preferences junction table
-export const dealDietaryPreferences = pgTable("deal_dietary_preferences", {
-  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
-  dealId: bigint("deal_id", { mode: "number" })
-    .notNull()
-    .references(() => deals.id),
-  dietaryPreferenceId: bigint("dietary_preference_id", { mode: "number" })
-    .notNull()
-    .references(() => dietaryPreferences.id),
-});
+export const dealDietaryPreferences = pgTable(
+  "deal_dietary_preferences",
+  {
+    id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+    dealId: bigint("deal_id", { mode: "number" })
+      .notNull()
+      .references(() => deals.id),
+    dietaryPreferenceId: bigint("dietary_preference_id", { mode: "number" })
+      .notNull()
+      .references(() => dietaryPreferences.id),
+  },
+  (table) => [
+    index("idx_deal_dietary_preferences_deal_id").on(table.dealId),
+    uniqueIndex("uniq_deal_dietary_pair").on(table.dealId, table.dietaryPreferenceId),
+  ]
+);
 
 // 11. User favorite deals table
-export const userFavoriteDeals = pgTable("user_favorite_deals", {
-  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
-  userId: uuid("user_id")
-    .notNull()
-    .references(() => users.id),
-  dealId: bigint("deal_id", { mode: "number" })
-    .notNull()
-    .references(() => deals.id),
-  createdAt: timestamp("created_at").defaultNow(),
-});
+export const userFavoriteDeals = pgTable(
+  "user_favorite_deals",
+  {
+    id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id),
+    dealId: bigint("deal_id", { mode: "number" })
+      .notNull()
+      .references(() => deals.id),
+    createdAt: timestamp("created_at").defaultNow(),
+  },
+  (table) => [
+    index("idx_user_favorite_deals_user_deal").on(table.userId, table.dealId),
+    uniqueIndex("uniq_user_favorite_deal").on(table.userId, table.dealId),
+  ]
+);
 
 // 12. User favorite restaurants table
-export const userFavoriteRestaurants = pgTable("user_favorite_restaurants", {
-  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
-  userId: uuid("user_id")
-    .notNull()
-    .references(() => users.id),
-  restaurantId: bigint("restaurant_id", { mode: "number" })
-    .notNull()
-    .references(() => restaurants.id),
-  notifyOnDeal: boolean("notify_on_deal").default(false),
-  createdAt: timestamp("created_at").defaultNow(),
-});
+export const userFavoriteRestaurants = pgTable(
+  "user_favorite_restaurants",
+  {
+    id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id),
+    restaurantId: bigint("restaurant_id", { mode: "number" })
+      .notNull()
+      .references(() => restaurants.id),
+    notifyOnDeal: boolean("notify_on_deal").default(false),
+    createdAt: timestamp("created_at").defaultNow(),
+  },
+  (table) => [
+    index("idx_user_favorite_restaurants_user_restaurant").on(table.userId, table.restaurantId),
+    uniqueIndex("uniq_user_favorite_restaurant").on(table.userId, table.restaurantId),
+  ]
+);
 
 // 13. User cuisines table (favorite cuisines)
 export const userCuisines = pgTable("user_cuisines", {
