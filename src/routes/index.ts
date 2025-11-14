@@ -1,5 +1,4 @@
 import authRoutes from "./auth.js";
-import dealReportsRoutes from "./deal-reports.js";
 import dealsRoutes from "./deals.js";
 import menuRoutes from "./menu.js";
 import notificationsRoutes from "./notifications.js";
@@ -9,10 +8,11 @@ import preferencesRoutes from "./preferences.js";
 import ratingsRoutes from "./ratings.js";
 import searchRoutes from "./search.js";
 import userRoutes from "./user.js";
+import dealReportsRoutes from "./deal-reports.js";
+import commentReportsRoutes from "./comment-reports.js";
 
 export {
   authRoutes,
-  dealReportsRoutes,
   dealsRoutes,
   menuRoutes,
   notificationsRoutes,
@@ -22,12 +22,13 @@ export {
   ratingsRoutes,
   searchRoutes,
   userRoutes,
+  dealReportsRoutes,
+  commentReportsRoutes,
 };
 
 // Default export for convenient importing
 export default {
   auth: authRoutes,
-  dealReports: dealReportsRoutes,
   deals: dealsRoutes,
   menu: menuRoutes,
   notifications: notificationsRoutes,
@@ -37,4 +38,6 @@ export default {
   ratings: ratingsRoutes,
   search: searchRoutes,
   user: userRoutes,
+  dealReports: dealReportsRoutes,
+  commentReports: commentReportsRoutes,
 };

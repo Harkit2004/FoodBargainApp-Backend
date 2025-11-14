@@ -170,6 +170,20 @@ export class AuthHelper {
     return userId;
   }
 
+  static requireAdmin(req: AuthenticatedRequest, res: Response): string | null {
+    const userId = this.requireAuth(req, res);
+    if (!userId) {
+      return null;
+    }
+
+    if (!req.user?.isAdmin) {
+      ResponseHelper.forbidden(res, ErrorMessages.FORBIDDEN_ACCESS);
+      return null;
+    }
+
+    return userId;
+  }
+
   static getOptionalAuth(req: AuthenticatedRequest): string | null {
     // Try to get user from authenticated request, return null if not authenticated
     return req.user?.id || null;

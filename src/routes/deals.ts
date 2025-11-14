@@ -8,13 +8,16 @@ import {
   userFavoriteDeals,
   dealCuisines,
   dealDietaryPreferences,
-  cuisines,
   dietaryPreferences,
+  cuisines,
+  notifications,
+  users,
 } from "../db/schema.js";
 import { eq, and, inArray } from "drizzle-orm";
 import type { AuthenticatedRequest } from "../middleware/auth.js";
 import { authenticateUser } from "../middleware/auth.js";
 import { ResponseHelper, AuthHelper, ValidationHelper, DbHelper } from "../utils/api-helpers.js";
+import { sendDealRemovalEmail } from "../utils/email.js";
 
 const router = Router();
 
@@ -42,7 +45,6 @@ router.post(
         if (deal.length === 0) {
           throw new Error("Deal not found");
         }
-
         if (!deal[0] || deal[0].status !== "active") {
           throw new Error("Deal is not currently active");
         }
@@ -519,6 +521,79 @@ router.get("/", optionalAuth, async (req: AuthenticatedRequest, res: Response) =
 
   if (result) {
     ResponseHelper.success(res, result);
+  }
+});
+
+// Admin: Remove any deal from the platform
+router.delete("/:dealId", authenticateUser, async (req: AuthenticatedRequest, res: Response) => {
+  const adminId = AuthHelper.requireAdmin(req, res);
+  if (!adminId) return;
+
+  const dealId = ValidationHelper.parseId(req.params.dealId as string);
+  if (dealId === null) {
+    return ResponseHelper.badRequest(res, "Invalid deal ID");
+  }
+
+  const result = await DbHelper.executeWithErrorHandling(
+    async () => {
+      const dealRecord = await db
+        .select({
+          id: deals.id,
+          title: deals.title,
+          restaurantName: restaurants.name,
+          partnerUserId: partners.userId,
+          partnerBusinessName: partners.businessName,
+          partnerEmail: users.email,
+          partnerName: users.displayName,
+        })
+        .from(deals)
+        .innerJoin(restaurants, eq(deals.restaurantId, restaurants.id))
+        .innerJoin(partners, eq(deals.partnerId, partners.id))
+        .leftJoin(users, eq(partners.userId, users.id))
+        .where(eq(deals.id, dealId))
+        .limit(1);
+
+      if (dealRecord.length === 0) {
+        throw new Error("Deal not found");
+      }
+
+      // Neon HTTP driver does not support transactions, so perform deletes sequentially.
+      await db.delete(userFavoriteDeals).where(eq(userFavoriteDeals.dealId, dealId));
+      await db.delete(dealCuisines).where(eq(dealCuisines.dealId, dealId));
+      await db.delete(dealDietaryPreferences).where(eq(dealDietaryPreferences.dealId, dealId));
+      await db.delete(notifications).where(eq(notifications.dealId, dealId));
+      await db.delete(deals).where(eq(deals.id, dealId));
+
+      if (dealRecord[0]!.partnerUserId) {
+        await db.insert(notifications).values({
+          userId: dealRecord[0]!.partnerUserId,
+          type: "system",
+          title: "Deal removed by FoodBargain",
+          message: `Your deal "${dealRecord[0]!.title}" was removed by an administrator. Please review the listing details before submitting again.`,
+          createdAt: new Date(),
+        });
+      }
+
+      if (dealRecord[0]!.partnerEmail) {
+        await sendDealRemovalEmail({
+          userEmail: dealRecord[0]!.partnerEmail,
+          userName: dealRecord[0]!.partnerName || dealRecord[0]!.partnerBusinessName,
+          dealTitle: dealRecord[0]!.title,
+          restaurantName: dealRecord[0]!.restaurantName,
+        });
+      }
+
+      return {
+        dealId,
+        removed: true,
+      };
+    },
+    res,
+    "Failed to remove deal"
+  );
+
+  if (result) {
+    ResponseHelper.success(res, result, "Deal removed successfully");
   }
 });
 

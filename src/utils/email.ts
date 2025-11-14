@@ -31,6 +31,13 @@ interface NewDealEmailData {
   dealId: number;
 }
 
+interface DealRemovalEmailData {
+  userEmail: string;
+  userName: string | null;
+  dealTitle: string;
+  restaurantName: string | null;
+}
+
 /**
  * Send a deal expiration notification email
  */
@@ -351,6 +358,63 @@ The FoodBargain Team
     return true;
   } catch (error) {
     console.error("Failed to send new deal email:", error);
+    if (error instanceof Error && "response" in error) {
+      const sgError = error as { response?: { body: unknown } };
+      console.error("SendGrid error details:", sgError.response?.body);
+    }
+    return false;
+  }
+}
+
+export async function sendDealRemovalEmail(data: DealRemovalEmailData): Promise<boolean> {
+  if (!sendgridApiKey) {
+    console.warn("SendGrid not configured. Skipping removal email for deal:", data.dealTitle);
+    return false;
+  }
+
+  try {
+    const msg = {
+      to: data.userEmail,
+      from: fromEmail,
+      subject: `⚠️ Deal Removed: ${data.dealTitle}`,
+      text: `Hi ${data.userName || "there"},
+
+Your deal "${data.dealTitle}" for ${data.restaurantName || "your restaurant"} was removed from FoodBargain after the Trust & Safety team reviewed multiple customer reports. Please review the deal details and resubmit once issues are resolved.
+
+If you have questions, reply to this email and our support team will help.
+
+— FoodBargain Trust & Safety`,
+      html: `
+<!DOCTYPE html>
+<html>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; color: #111;">
+  <div style="max-width: 560px; margin: 0 auto; border: 1px solid #eee; border-radius: 12px; overflow: hidden;">
+    <div style="background: #fee2e2; color: #b91c1c; padding: 24px;">
+      <h2 style="margin: 0; font-size: 20px;">Deal Removed After Review</h2>
+    </div>
+    <div style="padding: 24px;">
+      <p>Hi <strong>${data.userName || "there"}</strong>,</p>
+      <p>
+        We removed your deal <strong>"${data.dealTitle}"</strong>${
+          data.restaurantName ? ` for <strong>${data.restaurantName}</strong>` : ""
+        } after reviewing multiple customer reports.
+      </p>
+      <p>Please review the deal details, resolve any issues, and resubmit the deal if appropriate.</p>
+      <p style="margin-top: 24px; color: #6b7280; font-size: 14px;">
+        If you have questions, just reply to this email and our Trust & Safety team will assist you.
+      </p>
+    </div>
+  </div>
+</body>
+</html>
+      `,
+    };
+
+    await sgMail.send(msg);
+    console.log(`✅ Deal removal email sent to ${data.userEmail} for: ${data.dealTitle}`);
+    return true;
+  } catch (error) {
+    console.error("Failed to send deal removal email:", error);
     if (error instanceof Error && "response" in error) {
       const sgError = error as { response?: { body: unknown } };
       console.error("SendGrid error details:", sgError.response?.body);

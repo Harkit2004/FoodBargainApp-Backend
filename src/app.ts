@@ -5,7 +5,6 @@ import "dotenv/config";
 import {
   authRoutes,
   userRoutes,
-  dealReportsRoutes,
   dealsRoutes,
   partnerRoutes,
   menuRoutes,
@@ -14,6 +13,8 @@ import {
   searchRoutes,
   notificationsRoutes,
   ratingsRoutes,
+  dealReportsRoutes,
+  commentReportsRoutes,
 } from "./routes/index.js";
 
 const app = express();
@@ -74,7 +75,6 @@ app.get("/health", (req, res) => {
 // API Routes
 app.use("/api/auth", authRoutes);
 app.use("/api/user", userRoutes);
-app.use("/api/deal-reports", dealReportsRoutes);
 app.use("/api/deals", dealsRoutes);
 app.use("/api/partner", partnerRoutes);
 app.use("/api/menu", menuRoutes);
@@ -83,6 +83,8 @@ app.use("/api/preferences", preferencesRoutes);
 app.use("/api/search", searchRoutes);
 app.use("/api/notifications", notificationsRoutes);
 app.use("/api/ratings", ratingsRoutes);
+app.use("/api/deal-reports", dealReportsRoutes);
+app.use("/api/comment-reports", commentReportsRoutes);
 
 // 404 handler - catch all remaining requests
 app.use((req, res) => {
