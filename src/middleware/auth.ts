@@ -11,6 +11,7 @@ export interface AuthenticatedRequest extends Request {
     email?: string;
     displayName?: string;
     isPartner?: boolean;
+    isAdmin?: boolean;
   };
 }
 
@@ -70,6 +71,7 @@ export const authenticateUser = async (
       email: dbUser[0]!.email || "",
       displayName: dbUser[0]!.displayName || "",
       isPartner: partnerCheck.length > 0,
+      isAdmin: dbUser[0]!.isAdmin ?? false,
     };
 
     next();

@@ -143,6 +143,7 @@ router.post("/register", async (req: Request, res: Response) => {
           phone: result.phone,
           clerkUserId: result.clerkUserId,
           isPartner: false, // New users are not partners by default
+          isAdmin: result.isAdmin ?? false,
         },
       },
     });
@@ -211,6 +212,7 @@ router.post("/login", async (req: Request, res: Response) => {
           location: user[0]!.location,
           phone: user[0]!.phone,
           isPartner,
+          isAdmin: user[0]!.isAdmin ?? false,
         },
       },
     });
