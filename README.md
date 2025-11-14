@@ -124,7 +124,7 @@ A comprehensive Node.js backend API for the FoodBargain application, featuring r
    - Copy your Secret Key and Publishable Key to `.env`
    - Configure authentication methods (email/password, social logins, etc.)
 
-## 🚀 Running the Application
+## �🚀 Running the Application
 
 ### Development Mode
 

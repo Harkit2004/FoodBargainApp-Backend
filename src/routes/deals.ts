@@ -161,6 +161,7 @@ router.get("/favorites", authenticateUser, async (req: AuthenticatedRequest, res
             streetAddress: restaurants.streetAddress,
             city: restaurants.city,
             province: restaurants.province,
+            imageUrl: restaurants.imageUrl,
           },
           partner: {
             id: partners.id,
@@ -415,6 +416,7 @@ router.get("/", optionalAuth, async (req: AuthenticatedRequest, res: Response) =
             streetAddress: restaurants.streetAddress,
             city: restaurants.city,
             province: restaurants.province,
+            imageUrl: restaurants.imageUrl,
             ratingAvg: restaurants.ratingAvg,
             ratingCount: restaurants.ratingCount,
             latitude: restaurants.latitude,

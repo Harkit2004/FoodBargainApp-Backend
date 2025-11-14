@@ -92,6 +92,7 @@ type SearchResult<T> = {
 type RestaurantSearchRow = {
   id: number;
   name: string;
+  imageUrl: string | null;
   description: string | null;
   streetAddress: string | null;
   city: string | null;
@@ -130,6 +131,7 @@ type DealSearchRow = {
   restaurant: {
     id: number;
     name: string;
+    imageUrl: string | null;
     streetAddress: string | null;
     city: string | null;
     province: string | null;
@@ -390,6 +392,7 @@ const getRestaurantSearchResults = async (
   const selection = {
     id: restaurants.id,
     name: restaurants.name,
+    imageUrl: restaurants.imageUrl,
     description: restaurants.description,
     streetAddress: restaurants.streetAddress,
     city: restaurants.city,
@@ -419,6 +422,7 @@ const getRestaurantSearchResults = async (
   const totalCountResult = await db
     .select({ count: sql<number>`count(*)` })
     .from(restaurants)
+    .innerJoin(partners, eq(restaurants.partnerId, partners.id))
     .where(and(...whereConditions));
   const totalCount = totalCountResult[0]?.count ?? 0;
   const totalPages = Math.max(1, Math.ceil(totalCount / filters.limit));
@@ -617,6 +621,7 @@ const getDealSearchResults = async (
     restaurant: {
       id: restaurants.id,
       name: restaurants.name,
+      imageUrl: restaurants.imageUrl,
       streetAddress: restaurants.streetAddress,
       city: restaurants.city,
       province: restaurants.province,
@@ -876,6 +881,7 @@ router.get("/restaurants/:restaurantId", optionalAuth, async (req: Request, res:
         .select({
           id: restaurants.id,
           name: restaurants.name,
+          imageUrl: restaurants.imageUrl,
           description: restaurants.description,
           streetAddress: restaurants.streetAddress,
           city: restaurants.city,

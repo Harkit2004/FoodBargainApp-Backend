@@ -232,6 +232,7 @@ router.post("/restaurants", requirePartner, async (req: AuthenticatedRequest, re
     longitude,
     openingTime,
     closingTime,
+    imageUrl,
   } = req.body;
 
   if (!name) {
@@ -268,6 +269,7 @@ router.post("/restaurants", requirePartner, async (req: AuthenticatedRequest, re
           longitude: longitude || null,
           openingTime: openingTime || null,
           closingTime: closingTime || null,
+          imageUrl: imageUrl || null,
         })
         .returning();
 
@@ -289,6 +291,7 @@ router.post("/restaurants", requirePartner, async (req: AuthenticatedRequest, re
         openingTime: newRestaurant[0].openingTime,
         closingTime: newRestaurant[0].closingTime,
         isActive: newRestaurant[0].isActive,
+        imageUrl: newRestaurant[0].imageUrl,
         createdAt: newRestaurant[0].createdAt,
       };
     },
@@ -455,6 +458,7 @@ router.put(
       openingTime,
       closingTime,
       isActive,
+      imageUrl,
     } = req.body;
 
     if (name !== undefined && !name.trim()) {
@@ -510,7 +514,13 @@ router.put(
         if (longitude !== undefined) updateData.longitude = longitude;
         if (openingTime !== undefined) updateData.openingTime = openingTime;
         if (closingTime !== undefined) updateData.closingTime = closingTime;
-        if (isActive !== undefined) updateData.isActive = isActive;
+        if (isActive !== undefined) {
+          updateData.isActive = isActive;
+        }
+
+        if (imageUrl !== undefined) {
+          updateData.imageUrl = imageUrl;
+        }
 
         // Update restaurant
         const updatedRestaurant = await db
