@@ -335,7 +335,7 @@ router.delete("/:ratingId", async (req: AuthenticatedRequest, res: Response) => 
  * - limit (optional): Results per page (default: 20, max: 100)
  */
 router.get("/", async (req: AuthenticatedRequest, res: Response) => {
-  const { targetType, targetId, page: pageStr, limit: limitStr } = req.query;
+  const { targetType, targetId, page: pageStr, limit: limitStr, tags: tagsStr } = req.query;
 
   if (!validateTargetType(targetType as string)) {
     return ResponseHelper.badRequest(
@@ -353,8 +353,52 @@ router.get("/", async (req: AuthenticatedRequest, res: Response) => {
   const limit = Math.min(Math.max(1, parseInt(limitStr as string) || 20), 100);
   const offset = (page - 1) * limit;
 
+  const tagsFilter = tagsStr
+    ? (tagsStr as string)
+        .split(",")
+        .map((t) => parseInt(t.trim()))
+        .filter((n) => !isNaN(n))
+    : [];
+
   const result = await DbHelper.executeWithErrorHandling(
     async () => {
+      let whereConditions = and(
+        eq(ratings.targetType, targetType as "restaurant" | "menu_item" | "deal"),
+        eq(ratings.targetId, targetIdNum)
+      );
+
+      if (tagsFilter.length > 0) {
+        // Find ratings that have ANY of the selected tags
+        // We use a subquery approach that is more robust
+        const matchingRatings = await db
+          .select({ ratingId: ratingTags.ratingId })
+          .from(ratingTags)
+          .where(inArray(ratingTags.tagId, tagsFilter));
+
+        const matchingRatingIds = matchingRatings.map((r) => r.ratingId);
+
+        if (matchingRatingIds.length === 0) {
+          // If tags are selected but no ratings match, return empty result immediately
+          return {
+            ratings: [],
+            aggregate: {
+              averageRating: 0,
+              totalCount: 0,
+              distribution: [],
+            },
+            pagination: {
+              currentPage: page,
+              totalPages: 0,
+              totalCount: 0,
+              hasNextPage: false,
+              hasPreviousPage: false,
+            },
+          };
+        }
+
+        whereConditions = and(whereConditions, inArray(ratings.id, matchingRatingIds));
+      }
+
       // Get ratings with user information
       const ratingsWithUsers = await db
         .select({
@@ -370,12 +414,7 @@ router.get("/", async (req: AuthenticatedRequest, res: Response) => {
         })
         .from(ratings)
         .innerJoin(users, eq(ratings.userId, users.id))
-        .where(
-          and(
-            eq(ratings.targetType, targetType as "restaurant" | "menu_item" | "deal"),
-            eq(ratings.targetId, targetIdNum)
-          )
-        )
+        .where(whereConditions)
         .limit(limit)
         .offset(offset)
         .orderBy(ratings.createdAt);
