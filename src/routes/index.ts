@@ -12,6 +12,7 @@ import dealReportsRoutes from "./deal-reports.js";
 import commentReportsRoutes from "./comment-reports.js";
 import adminRoutes from "./admin.js";
 import disputesRoutes from "./disputes.js";
+import tagsRoutes from "./tags.js";
 
 export {
   authRoutes,
@@ -28,6 +29,7 @@ export {
   commentReportsRoutes,
   adminRoutes,
   disputesRoutes,
+  tagsRoutes,
 };
 
 // Default export for convenient importing
@@ -46,4 +48,5 @@ export default {
   commentReports: commentReportsRoutes,
   admin: adminRoutes,
   disputes: disputesRoutes,
+  tags: tagsRoutes,
 };

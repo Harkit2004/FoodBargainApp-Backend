@@ -1,8 +1,16 @@
 import { Router } from "express";
 import type { Response } from "express";
 import { db } from "../db/db.js";
-import { ratings, restaurants, menuItems, deals, users } from "../db/schema.js";
-import { eq, and, avg, count } from "drizzle-orm";
+import {
+  ratings,
+  restaurants,
+  menuItems,
+  deals,
+  users,
+  ratingTags,
+  reviewTags,
+} from "../db/schema.js";
+import { eq, and, avg, count, inArray } from "drizzle-orm";
 import type { AuthenticatedRequest } from "../middleware/auth.js";
 import { authenticateUser } from "../middleware/auth.js";
 import {
@@ -34,7 +42,7 @@ router.post("/", async (req: AuthenticatedRequest, res: Response) => {
   const userId = AuthHelper.requireAuth(req, res);
   if (!userId) return;
 
-  const { targetType, targetId, rating, comment } = req.body;
+  const { targetType, targetId, rating, comment, tags } = req.body;
 
   // Validate inputs
   const targetTypeValidation = ValidationHelper.validateTargetType(targetType);
@@ -48,6 +56,10 @@ router.post("/", async (req: AuthenticatedRequest, res: Response) => {
 
   if (typeof rating !== "number" || rating < 1 || rating > 5) {
     return ResponseHelper.badRequest(res, "Rating must be between 1 and 5");
+  }
+
+  if (tags && (!Array.isArray(tags) || !tags.every((t) => typeof t === "number"))) {
+    return ResponseHelper.badRequest(res, "Tags must be an array of tag IDs");
   }
 
   const result = await DbHelper.executeWithErrorHandling(
@@ -118,6 +130,16 @@ router.post("/", async (req: AuthenticatedRequest, res: Response) => {
         })
         .returning();
 
+      // Insert tags if provided
+      if (tags && tags.length > 0) {
+        await db.insert(ratingTags).values(
+          tags.map((tagId: number) => ({
+            ratingId: newRating[0]!.id,
+            tagId,
+          }))
+        );
+      }
+
       // Update aggregate rating for restaurants
       if (targetType === "restaurant") {
         await updateRestaurantAggregateRating(targetId);
@@ -130,6 +152,7 @@ router.post("/", async (req: AuthenticatedRequest, res: Response) => {
         targetName,
         rating: newRating[0]!.rating,
         comment: newRating[0]!.comment,
+        tags: tags || [],
         createdAt: newRating[0]!.createdAt,
       };
     },
@@ -166,9 +189,13 @@ router.put("/:ratingId", async (req: AuthenticatedRequest, res: Response) => {
     return ResponseHelper.badRequest(res, "Invalid rating ID");
   }
 
-  const { rating, comment } = req.body;
+  const { rating, comment, tags } = req.body;
   if (rating !== undefined && (typeof rating !== "number" || rating < 1 || rating > 5)) {
     return ResponseHelper.badRequest(res, "Rating must be between 1 and 5");
+  }
+
+  if (tags !== undefined && (!Array.isArray(tags) || !tags.every((t) => typeof t === "number"))) {
+    return ResponseHelper.badRequest(res, "Tags must be an array of tag IDs");
   }
 
   const result = await DbHelper.executeWithErrorHandling(
@@ -204,6 +231,22 @@ router.put("/:ratingId", async (req: AuthenticatedRequest, res: Response) => {
         .where(eq(ratings.id, ratingId))
         .returning();
 
+      // Update tags if provided
+      if (tags !== undefined) {
+        // Delete existing tags
+        await db.delete(ratingTags).where(eq(ratingTags.ratingId, ratingId));
+
+        // Insert new tags
+        if (tags.length > 0) {
+          await db.insert(ratingTags).values(
+            tags.map((tagId: number) => ({
+              ratingId,
+              tagId,
+            }))
+          );
+        }
+      }
+
       // Update aggregate rating for restaurants if rating changed
       if (rating !== undefined && existingRating[0]!.targetType === "restaurant") {
         await updateRestaurantAggregateRating(existingRating[0]!.targetId);
@@ -215,6 +258,7 @@ router.put("/:ratingId", async (req: AuthenticatedRequest, res: Response) => {
         targetId: updatedRating[0]!.targetId,
         rating: updatedRating[0]!.rating,
         comment: updatedRating[0]!.comment,
+        tags: tags || [], // Return updated tags
         updatedAt: updatedRating[0]!.updatedAt,
       };
     },
@@ -336,6 +380,36 @@ router.get("/", async (req: AuthenticatedRequest, res: Response) => {
         .offset(offset)
         .orderBy(ratings.createdAt);
 
+      // Fetch tags for these ratings
+      const ratingIds = ratingsWithUsers.map((r) => r.id);
+      const tagsMap: Record<number, { id: number; name: string; isCustom: boolean }[]> = {};
+
+      if (ratingIds.length > 0) {
+        const tagsResult = await db
+          .select({
+            ratingId: ratingTags.ratingId,
+            tag: {
+              id: reviewTags.id,
+              name: reviewTags.name,
+              isCustom: reviewTags.isCustom,
+            },
+          })
+          .from(ratingTags)
+          .innerJoin(reviewTags, eq(ratingTags.tagId, reviewTags.id))
+          .where(inArray(ratingTags.ratingId, ratingIds));
+
+        tagsResult.forEach((row) => {
+          const list = tagsMap[row.ratingId] ?? (tagsMap[row.ratingId] = []);
+          list.push(row.tag);
+        });
+      }
+
+      // Attach tags to ratings
+      const ratingsWithTags = ratingsWithUsers.map((r) => ({
+        ...r,
+        tags: tagsMap[r.id] || [],
+      }));
+
       // Get aggregate statistics
       const aggregateStats = await db
         .select({
@@ -372,7 +446,7 @@ router.get("/", async (req: AuthenticatedRequest, res: Response) => {
         .orderBy(ratings.rating);
 
       return {
-        ratings: ratingsWithUsers,
+        ratings: ratingsWithTags,
         aggregate: {
           averageRating: avgRating,
           totalCount,
@@ -450,8 +524,8 @@ router.get("/my-ratings", async (req: AuthenticatedRequest, res: Response) => {
         .offset(offset)
         .orderBy(ratings.createdAt);
 
-      // Get target names for each rating
-      const ratingsWithTargetNames = await Promise.all(
+      // Get target names and tags for each rating
+      const ratingsWithDetails = await Promise.all(
         myRatings.map(async (rating) => {
           let targetName = "";
 
@@ -480,15 +554,27 @@ router.get("/my-ratings", async (req: AuthenticatedRequest, res: Response) => {
             targetName = deal.length > 0 && deal[0] ? deal[0].title : "Unknown Deal";
           }
 
+          // Fetch tags
+          const tags = await db
+            .select({
+              id: reviewTags.id,
+              name: reviewTags.name,
+              isCustom: reviewTags.isCustom,
+            })
+            .from(ratingTags)
+            .innerJoin(reviewTags, eq(ratingTags.tagId, reviewTags.id))
+            .where(eq(ratingTags.ratingId, rating.id));
+
           return {
             ...rating,
             targetName,
+            tags,
           };
         })
       );
 
       return {
-        ratings: ratingsWithTargetNames,
+        ratings: ratingsWithDetails,
         pagination: {
           currentPage: page,
           totalPages: Math.ceil(myRatings.length / limit),

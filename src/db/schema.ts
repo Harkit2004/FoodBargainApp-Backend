@@ -316,6 +316,26 @@ export const notifications = pgTable("notifications", {
   createdAt: timestamp("created_at").defaultNow(),
 });
 
+// 19. Review Tags table
+export const reviewTags = pgTable("review_tags", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+  name: varchar("name").notNull().unique(),
+  isCustom: boolean("is_custom").default(false).notNull(),
+  createdBy: uuid("created_by").references(() => users.id), // Null for system tags
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+// 20. Rating Tags junction table
+export const ratingTags = pgTable("rating_tags", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+  ratingId: bigint("rating_id", { mode: "number" })
+    .notNull()
+    .references(() => ratings.id, { onDelete: "cascade" }),
+  tagId: bigint("tag_id", { mode: "number" })
+    .notNull()
+    .references(() => reviewTags.id, { onDelete: "cascade" }),
+});
+
 // Relations
 export const usersRelations = relations(users, ({ one, many }) => ({
   partner: one(partners),
@@ -383,4 +403,19 @@ export const dealReportsRelations = relations(dealReports, ({ one }) => ({
 export const notificationsRelations = relations(notifications, ({ one }) => ({
   user: one(users, { fields: [notifications.userId], references: [users.id] }),
   deal: one(deals, { fields: [notifications.dealId], references: [deals.id] }),
+}));
+
+export const reviewTagsRelations = relations(reviewTags, ({ one, many }) => ({
+  creator: one(users, { fields: [reviewTags.createdBy], references: [users.id] }),
+  ratings: many(ratingTags),
+}));
+
+export const ratingTagsRelations = relations(ratingTags, ({ one }) => ({
+  rating: one(ratings, { fields: [ratingTags.ratingId], references: [ratings.id] }),
+  tag: one(reviewTags, { fields: [ratingTags.tagId], references: [reviewTags.id] }),
+}));
+
+export const ratingsRelations = relations(ratings, ({ one, many }) => ({
+  user: one(users, { fields: [ratings.userId], references: [users.id] }),
+  tags: many(ratingTags),
 }));

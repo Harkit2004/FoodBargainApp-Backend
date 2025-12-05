@@ -17,6 +17,7 @@ import {
   commentReportsRoutes,
   adminRoutes,
   disputesRoutes,
+  tagsRoutes,
 } from "./routes/index.js";
 
 const app = express();
@@ -89,6 +90,7 @@ app.use("/api/deal-reports", dealReportsRoutes);
 app.use("/api/comment-reports", commentReportsRoutes);
 app.use("/api/admin", adminRoutes);
 app.use("/api/disputes", disputesRoutes);
+app.use("/api/tags", tagsRoutes);
 
 // 404 handler - catch all remaining requests
 app.use((req, res) => {
