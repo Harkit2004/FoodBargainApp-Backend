@@ -242,15 +242,20 @@ router.delete("/:ratingId", async (req: AuthenticatedRequest, res: Response) => 
 
   const result = await DbHelper.executeWithErrorHandling(
     async () => {
-      // Verify rating exists and belongs to user
+      // Verify rating exists
       const existingRating = await db
         .select()
         .from(ratings)
-        .where(and(eq(ratings.id, ratingId), eq(ratings.userId, userId)))
+        .where(eq(ratings.id, ratingId))
         .limit(1);
 
       if (existingRating.length === 0) {
-        throw new Error("Rating not found or you don't have permission to delete it");
+        throw new Error("Rating not found");
+      }
+
+      // Check permission: User must be the author OR an admin
+      if (existingRating[0]!.userId !== userId && !req.user?.isAdmin) {
+        throw new Error("You don't have permission to delete this rating");
       }
 
       const targetType = existingRating[0]!.targetType;

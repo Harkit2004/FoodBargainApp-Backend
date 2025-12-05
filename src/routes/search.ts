@@ -1,6 +1,7 @@
 import { Router } from "express";
 import type { Request, Response } from "express";
-import { and, asc, desc, eq, inArray, isNotNull, sql } from "drizzle-orm";
+import type { AuthenticatedRequest } from "../middleware/auth.js";
+import { and, asc, desc, eq, inArray, sql, or, ilike, exists } from "drizzle-orm";
 import { db } from "../db/db.js";
 import {
   restaurants,
@@ -14,437 +15,252 @@ import {
   userFavoriteDeals,
   users,
 } from "../db/schema.js";
-import { ResponseHelper, AuthHelper, ValidationHelper, DbHelper } from "../utils/api-helpers.js";
+import { ResponseHelper, AuthHelper, ValidationHelper } from "../utils/api-helpers.js";
+
+interface SearchRequest extends Request {
+  userId?: string;
+}
 
 const router = Router();
 
-// Optional authentication middleware for public endpoints that show user-specific data when logged in
-const optionalAuth = async (req: Request, res: Response, next: () => void) => {
-  try {
-    const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith("Bearer ")) {
-      // No auth provided, continue as public request
-      return next();
-    }
+// --- Types ---
 
-    const token = authHeader.substring(7); // Remove "Bearer " prefix
-    if (!token) {
-      return next();
-    }
+type SearchSort = "relevance" | "rating" | "distance" | "newest";
+type SortOrder = "asc" | "desc";
 
-    // Use the same verification logic as the main auth middleware
-    const { verifyToken } = await import("@clerk/backend");
-    const payload = await verifyToken(token, {
-      secretKey: process.env.CLERK_SECRET_KEY!,
-    });
+interface SearchResult {
+  items: unknown[];
+  pagination: {
+    currentPage: number;
+    totalPages: number;
+    totalCount: number;
+    hasNextPage: boolean;
+    hasPreviousPage: boolean;
+  };
+}
 
-    if (payload && payload.sub) {
-      // Find user in database
-      const user = await db.select().from(users).where(eq(users.clerkUserId, payload.sub)).limit(1);
-
-      if (user.length > 0 && user[0]) {
-        (req as Request & { userId?: string }).userId = user[0].id;
-      }
-    }
-  } catch (error) {
-    // Invalid token, continue as public request
-    console.log("Optional auth failed:", error);
-  }
-
-  next();
-};
-
-type ShowType = "all" | "restaurants" | "deals";
-type SearchSort = "relevance" | "rating" | "distance";
-
-type RawSearchFilters = {
-  query: string | null;
-  showType: ShowType;
+interface SearchFilters {
+  query?: string | undefined;
+  showType: "all" | "restaurants" | "deals";
   cuisineIds: number[];
-  cuisineNames: string[];
-  dietaryPreferenceIds: number[];
-  dietaryPreferenceNames: string[];
-  distanceKm: number | null;
-  latitude: number | null;
-  longitude: number | null;
+  dietaryIds: number[];
+  latitude?: number | undefined;
+  longitude?: number | undefined;
+  distanceKm?: number | undefined;
   page: number;
   limit: number;
   sortBy: SearchSort;
-  sortOrder: "asc" | "desc";
-  hasActiveDeals: boolean;
-};
+  sortOrder: SortOrder;
+  hasActiveDeals?: boolean;
+}
 
-type SearchFilters = Omit<RawSearchFilters, "cuisineNames" | "dietaryPreferenceNames">;
+// --- Helpers ---
 
-type SearchPagination = {
-  currentPage: number;
-  totalPages: number;
-  totalCount: number;
-  hasNextPage: boolean;
-  hasPreviousPage: boolean;
-};
+const parseFilters = (req: Request): SearchFilters => {
+  const query = (req.query.q || req.query.query)?.toString().trim() || undefined;
+  const showType = (
+    ["restaurants", "deals"].includes(req.query.showType as string) ? req.query.showType : "all"
+  ) as SearchFilters["showType"];
 
-type SearchResult<T> = {
-  items: T[];
-  pagination: SearchPagination;
-};
-
-type RestaurantSearchRow = {
-  id: number;
-  name: string;
-  imageUrl: string | null;
-  description: string | null;
-  streetAddress: string | null;
-  city: string | null;
-  province: string | null;
-  latitude: number | null;
-  longitude: number | null;
-  ratingAvg: string | null;
-  ratingCount: number | null;
-  openingTime: string | null;
-  closingTime: string | null;
-  createdAt: Date | null;
-  partner: {
-    businessName: string;
+  const parseIds = (param: unknown): number[] => {
+    if (!param) return [];
+    const arr = Array.isArray(param) ? param : [param];
+    return arr
+      .flatMap((x: unknown) => String(x).split(","))
+      .map((x: string) => parseInt(x.trim()))
+      .filter((x: number) => !isNaN(x));
   };
-  distanceKm: number | null;
-  activeDeals: Array<{
-    id: number;
-    title: string;
-    description: string | null;
-    restaurantId: number;
-    cuisines: Array<{ id: number; name: string }>;
-    dietaryPreferences: Array<{ id: number; name: string }>;
-  }>;
-  activeDealsCount: number;
-  isBookmarked: boolean;
-};
 
-type DealSearchRow = {
-  id: number;
-  title: string;
-  description: string | null;
-  status: "draft" | "active" | "expired" | "archived";
-  startDate: string;
-  endDate: string;
-  createdAt: Date | null;
-  restaurant: {
-    id: number;
-    name: string;
-    imageUrl: string | null;
-    streetAddress: string | null;
-    city: string | null;
-    province: string | null;
-    latitude: number | null;
-    longitude: number | null;
-    ratingAvg: string | null;
-    ratingCount: number | null;
-  };
-  partner: {
-    id: number;
-    businessName: string;
-  };
-  cuisines: Array<{ id: number; name: string }>;
-  dietaryPreferences: Array<{ id: number; name: string }>;
-  isBookmarked: boolean;
-  distanceKm: number | null;
-};
+  const cuisineIds = parseIds(req.query.cuisineIds || req.query.cuisineId);
+  const dietaryIds = parseIds(req.query.dietaryPreferenceIds || req.query.dietaryPreferenceId);
 
-type RestaurantSearchResult = SearchResult<RestaurantSearchRow>;
-type DealSearchResult = SearchResult<DealSearchRow>;
+  const lat = req.query.latitude ? parseFloat(req.query.latitude as string) : undefined;
+  const lng = req.query.longitude ? parseFloat(req.query.longitude as string) : undefined;
+  const dist = req.query.distance || req.query.radius;
+  const distanceKm = dist ? parseFloat(dist as string) : undefined;
 
-const parseNumberArrayParam = (value: unknown): number[] => {
-  if (!value) return [];
-  const values = Array.isArray(value) ? value : [value];
-  const numbers = values
-    .flatMap((entry) => String(entry).split(","))
-    .map((segment) => parseInt(segment.trim(), 10))
-    .filter((num) => !Number.isNaN(num));
+  const page = Math.max(1, parseInt(req.query.page as string) || 1);
+  const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 20));
 
-  return [...new Set(numbers)];
-};
+  const sortBy = (
+    ["rating", "distance", "newest"].includes(req.query.sortBy as string)
+      ? req.query.sortBy
+      : "relevance"
+  ) as SearchSort;
 
-const parseStringArrayParam = (value: unknown): string[] => {
-  if (!value) return [];
-  const values = Array.isArray(value) ? value : [value];
-  const strings = values
-    .flatMap((entry) => String(entry).split(","))
-    .map((segment) => segment.trim())
-    .filter((segment) => segment.length > 0);
-
-  return [...new Set(strings)];
-};
-
-const parseSearchFilters = (req: Request): RawSearchFilters => {
-  const queryParam = typeof req.query.q === "string" ? req.query.q : req.query.query;
-  const query =
-    typeof queryParam === "string" && queryParam.trim().length > 0 ? queryParam.trim() : null;
-
-  const showTypeRaw = (req.query.showType || req.query.entityType || req.query.type) as
-    | string
-    | undefined;
-  const showType: ShowType =
-    showTypeRaw === "restaurants" || showTypeRaw === "deals" ? showTypeRaw : "all";
-
-  const distanceParam = req.query.distance ?? req.query.radius ?? null;
-  const parsedDistance = typeof distanceParam === "string" ? parseFloat(distanceParam) : null;
-  const distanceKm =
-    parsedDistance !== null && !Number.isNaN(parsedDistance) && parsedDistance > 0
-      ? parsedDistance
-      : null;
-
-  const latitudeParam =
-    typeof req.query.latitude === "string" ? parseFloat(req.query.latitude) : null;
-  const latitude = latitudeParam !== null && !Number.isNaN(latitudeParam) ? latitudeParam : null;
-
-  const longitudeParam =
-    typeof req.query.longitude === "string" ? parseFloat(req.query.longitude) : null;
-  const longitude =
-    longitudeParam !== null && !Number.isNaN(longitudeParam) ? longitudeParam : null;
-
-  const pageParam = typeof req.query.page === "string" ? parseInt(req.query.page, 10) : 1;
-  const page = !Number.isNaN(pageParam) && pageParam > 0 ? pageParam : 1;
-
-  const limitParam = typeof req.query.limit === "string" ? parseInt(req.query.limit, 10) : 20;
-  const limit = Math.min(Math.max(1, Number.isNaN(limitParam) ? 20 : limitParam), 100);
-
-  const sortByRaw = typeof req.query.sortBy === "string" ? req.query.sortBy : "relevance";
-  const sortBy: SearchSort =
-    sortByRaw === "rating" || sortByRaw === "distance" ? sortByRaw : "relevance";
-
-  const sortOrderRaw = typeof req.query.sortOrder === "string" ? req.query.sortOrder : undefined;
-  let sortOrder: "asc" | "desc";
-  if (sortOrderRaw === "desc" || sortOrderRaw === "asc") {
-    sortOrder = sortOrderRaw;
-  } else if (sortBy === "rating" || sortBy === "relevance") {
+  let sortOrder: SortOrder = "asc";
+  if (req.query.sortOrder === "desc" || req.query.sortOrder === "asc") {
+    sortOrder = req.query.sortOrder as SortOrder;
+  } else if (sortBy === "rating" || sortBy === "newest" || sortBy === "relevance") {
     sortOrder = "desc";
-  } else {
-    sortOrder = "asc";
   }
-
-  const cuisineIds = [
-    ...parseNumberArrayParam(req.query.cuisineIds),
-    ...parseNumberArrayParam(req.query.cuisineId),
-  ];
-  const dietaryPreferenceIds = [
-    ...parseNumberArrayParam(req.query.dietaryPreferenceIds),
-    ...parseNumberArrayParam(req.query.dietaryPreferenceId),
-  ];
-
-  const cuisineNames = parseStringArrayParam(req.query.cuisine || req.query.cuisines);
-  const dietaryPreferenceNames = parseStringArrayParam(
-    req.query.dietaryPreference || req.query.dietaryPreferences
-  );
-
-  const hasActiveDeals = req.query.hasActiveDeals === "true";
 
   return {
     query,
     showType,
     cuisineIds,
-    cuisineNames,
-    dietaryPreferenceIds,
-    dietaryPreferenceNames,
-    distanceKm,
-    latitude,
-    longitude,
+    dietaryIds,
+    latitude: !isNaN(lat!) ? lat : undefined,
+    longitude: !isNaN(lng!) ? lng : undefined,
+    distanceKm: !isNaN(distanceKm!) ? distanceKm : undefined,
     page,
     limit,
     sortBy,
     sortOrder,
-    hasActiveDeals,
+    hasActiveDeals: req.query.hasActiveDeals === "true",
   };
 };
 
-const hydrateSearchFilters = async (filters: RawSearchFilters): Promise<SearchFilters> => {
-  let cuisineIds = filters.cuisineIds;
-  if (cuisineIds.length === 0 && filters.cuisineNames.length > 0) {
-    const cuisineRows = await db
-      .select({ id: cuisines.id })
-      .from(cuisines)
-      .where(inArray(cuisines.name, filters.cuisineNames));
-    cuisineIds = cuisineRows.map((row) => row.id);
-  }
-
-  let dietaryIds = filters.dietaryPreferenceIds;
-  if (dietaryIds.length === 0 && filters.dietaryPreferenceNames.length > 0) {
-    const dietaryRows = await db
-      .select({ id: dietaryPreferences.id })
-      .from(dietaryPreferences)
-      .where(inArray(dietaryPreferences.name, filters.dietaryPreferenceNames));
-    dietaryIds = dietaryRows.map((row) => row.id);
-  }
-
-  return {
-    query: filters.query,
-    showType: filters.showType,
-    cuisineIds,
-    dietaryPreferenceIds: dietaryIds,
-    distanceKm: filters.distanceKm,
-    latitude: filters.latitude,
-    longitude: filters.longitude,
-    page: filters.page,
-    limit: filters.limit,
-    sortBy: filters.sortBy,
-    sortOrder: filters.sortOrder,
-    hasActiveDeals: filters.hasActiveDeals,
-  };
-};
-
-const buildDistanceExpression = (
-  latitudeColumn: typeof restaurants.latitude,
-  longitudeColumn: typeof restaurants.longitude,
-  latitude: number | null,
-  longitude: number | null
-) => {
-  if (latitude === null || longitude === null) {
-    return null;
-  }
-
+const getDistanceSql = (lat: number, lng: number, targetLat: unknown, targetLng: unknown) => {
   return sql<number>`
     6371 * acos(
-      least(
-        1,
-        greatest(
-          -1,
-          cos(radians(${latitude})) * cos(radians(${latitudeColumn})) *
-          cos(radians(${longitudeColumn}) - radians(${longitude})) +
-          sin(radians(${latitude})) * sin(radians(${latitudeColumn}))
-        )
-      )
+      least(1, greatest(-1,
+        cos(radians(${lat})) * cos(radians(${targetLat})) *
+        cos(radians(${targetLng}) - radians(${lng})) +
+        sin(radians(${lat})) * sin(radians(${targetLat}))
+      ))
     )
   `;
 };
 
-const intersectIds = (current: number[] | null, next: number[]): number[] | null => {
-  if (current === null) {
-    return [...new Set(next)];
+// --- Search Logic ---
+
+const searchRestaurants = async (filters: SearchFilters, userId?: string) => {
+  const conditions = [eq(restaurants.isActive, true)];
+
+  // Text Search
+  if (filters.query) {
+    const term = `%${filters.query}%`;
+    conditions.push(
+      or(
+        ilike(restaurants.name, term),
+        ilike(restaurants.description, term),
+        ilike(partners.businessName, term)
+      )!
+    );
   }
 
-  const nextSet = new Set(next);
-  return current.filter((id) => nextSet.has(id));
-};
-
-const createEmptyResult = <T>(filters: SearchFilters): SearchResult<T> => ({
-  items: [],
-  pagination: {
-    currentPage: filters.page,
-    totalPages: 1,
-    totalCount: 0,
-    hasNextPage: false,
-    hasPreviousPage: filters.page > 1,
-  },
-});
-
-const getRestaurantSearchResults = async (
-  filters: SearchFilters,
-  userId?: string
-): Promise<RestaurantSearchResult> => {
-  let filteredRestaurantIds: number[] | null = null;
-
-  if (filters.hasActiveDeals) {
-    const activeRestaurants = await db
-      .selectDistinct({ restaurantId: deals.restaurantId })
-      .from(deals)
-      .where(eq(deals.status, "active"));
-    filteredRestaurantIds = intersectIds(
-      filteredRestaurantIds,
-      activeRestaurants.map((row) => row.restaurantId)
+  // Location Filter
+  let distanceCol = sql<number | null>`NULL`;
+  if (filters.latitude !== undefined && filters.longitude !== undefined) {
+    distanceCol = getDistanceSql(
+      filters.latitude,
+      filters.longitude,
+      restaurants.latitude,
+      restaurants.longitude
     );
-    if (!filteredRestaurantIds || filteredRestaurantIds.length === 0) {
-      return createEmptyResult(filters);
+    if (filters.distanceKm) {
+      conditions.push(sql`${distanceCol} <= ${filters.distanceKm}`);
     }
   }
 
-  const whereConditions: import("drizzle-orm").SQLWrapper[] = [eq(restaurants.isActive, true)];
+  // Cuisine & Dietary Filters (via Active Deals)
+  // If filters are present, we only show restaurants that have at least one active deal matching the criteria
+  if (filters.cuisineIds.length > 0 || filters.dietaryIds.length > 0 || filters.hasActiveDeals) {
+    const dealConditions = [eq(deals.restaurantId, restaurants.id), eq(deals.status, "active")];
 
-  if (filters.query) {
-    const term = `%${filters.query}%`;
-    whereConditions.push(
-      sql`(${restaurants.name} ILIKE ${term} OR ${partners.businessName} ILIKE ${term} OR COALESCE(${restaurants.description}, '') ILIKE ${term})`
+    if (filters.cuisineIds.length > 0) {
+      dealConditions.push(
+        exists(
+          db
+            .select()
+            .from(dealCuisines)
+            .where(
+              and(
+                eq(dealCuisines.dealId, deals.id),
+                inArray(dealCuisines.cuisineId, filters.cuisineIds)
+              )
+            )
+        )
+      );
+    }
+
+    if (filters.dietaryIds.length > 0) {
+      dealConditions.push(
+        exists(
+          db
+            .select()
+            .from(dealDietaryPreferences)
+            .where(
+              and(
+                eq(dealDietaryPreferences.dealId, deals.id),
+                inArray(dealDietaryPreferences.dietaryPreferenceId, filters.dietaryIds)
+              )
+            )
+        )
+      );
+    }
+
+    conditions.push(
+      exists(
+        db
+          .select()
+          .from(deals)
+          .where(and(...dealConditions))
+      )
     );
   }
 
-  if (filteredRestaurantIds && filteredRestaurantIds.length > 0) {
-    whereConditions.push(inArray(restaurants.id, filteredRestaurantIds));
+  // Sorting
+  let orderBy;
+  switch (filters.sortBy) {
+    case "rating":
+      orderBy =
+        filters.sortOrder === "asc" ? asc(restaurants.ratingAvg) : desc(restaurants.ratingAvg);
+      break;
+    case "distance":
+      orderBy = filters.sortOrder === "desc" ? desc(distanceCol) : asc(distanceCol);
+      break;
+    case "newest":
+      orderBy =
+        filters.sortOrder === "asc" ? asc(restaurants.createdAt) : desc(restaurants.createdAt);
+      break;
+    default: // relevance
+      // If query exists, we could sort by similarity, but for now default to rating or distance
+      orderBy = filters.latitude ? asc(distanceCol) : desc(restaurants.ratingAvg);
   }
 
-  const distanceExpr = buildDistanceExpression(
-    restaurants.latitude,
-    restaurants.longitude,
-    filters.latitude,
-    filters.longitude
-  );
-
-  const offset = (filters.page - 1) * filters.limit;
-
-  let orderByClause;
-  if (filters.sortBy === "rating") {
-    orderByClause =
-      filters.sortOrder === "asc" ? asc(restaurants.ratingAvg) : desc(restaurants.ratingAvg);
-  } else if (filters.sortBy === "distance" && distanceExpr) {
-    orderByClause = filters.sortOrder === "desc" ? desc(distanceExpr) : asc(distanceExpr);
-  } else {
-    orderByClause =
-      filters.sortOrder === "asc" ? asc(restaurants.createdAt) : desc(restaurants.createdAt);
-  }
-
-  const selection = {
-    id: restaurants.id,
-    name: restaurants.name,
-    imageUrl: restaurants.imageUrl,
-    description: restaurants.description,
-    streetAddress: restaurants.streetAddress,
-    city: restaurants.city,
-    province: restaurants.province,
-    latitude: restaurants.latitude,
-    longitude: restaurants.longitude,
-    ratingAvg: restaurants.ratingAvg,
-    ratingCount: restaurants.ratingCount,
-    openingTime: restaurants.openingTime,
-    closingTime: restaurants.closingTime,
-    createdAt: restaurants.createdAt,
-    partner: {
-      businessName: partners.businessName,
-    },
-    distanceKm: distanceExpr ?? sql<number | null>`NULL`,
-  };
-
-  const restaurantQuery = db
-    .select(selection)
+  // Query
+  const baseQuery = db
+    .select({
+      restaurant: restaurants,
+      partnerName: partners.businessName,
+      distance: distanceCol,
+    })
     .from(restaurants)
     .innerJoin(partners, eq(restaurants.partnerId, partners.id))
-    .where(and(...whereConditions))
-    .orderBy(orderByClause)
-    .limit(filters.limit)
-    .offset(offset);
+    .where(and(...conditions));
 
-  const totalCountQuery = db
+  const totalCountRes = await db
     .select({ count: sql<number>`count(*)` })
-    .from(restaurants)
-    .innerJoin(partners, eq(restaurants.partnerId, partners.id))
-    .where(and(...whereConditions));
+    .from(baseQuery.as("subquery"));
 
-  const [restaurantRows, totalCountResult] = await Promise.all([restaurantQuery, totalCountQuery]);
-  const totalCount = totalCountResult[0]?.count ?? 0;
-  const totalPages = Math.max(1, Math.ceil(totalCount / filters.limit));
+  const totalCount = Number(totalCountRes[0]?.count || 0);
+  const totalPages = Math.ceil(totalCount / filters.limit);
 
-  const restaurantIds = restaurantRows.map((row) => row.id);
+  const rows = await baseQuery
+    .orderBy(orderBy)
+    .limit(filters.limit)
+    .offset((filters.page - 1) * filters.limit);
 
+  // Hydrate with Active Deals & Bookmarks
+  // We fetch active deals for the returned restaurants to display them in the card
+  const restaurantIds = rows.map((r) => r.restaurant.id);
   const activeDealsMap = new Map<
     number,
-    Array<{
+    {
       id: number;
       title: string;
       description: string | null;
-      restaurantId: number;
-      cuisines: Array<{ id: number; name: string }>;
-      dietaryPreferences: Array<{ id: number; name: string }>;
-    }>
+      cuisines: { id: number; name: string }[];
+      dietaryPreferences: { id: number; name: string }[];
+    }[]
   >();
-  let bookmarkedRestaurantIds: number[] = [];
+  const bookmarkedIds = new Set<number>();
+
   if (restaurantIds.length > 0) {
-    const activeDealsPromise = db
+    // Fetch Active Deals
+    const activeDealsRows = await db
       .select({
         id: deals.id,
         title: deals.title,
@@ -452,87 +268,89 @@ const getRestaurantSearchResults = async (
         restaurantId: deals.restaurantId,
       })
       .from(deals)
-      .where(and(inArray(deals.restaurantId, restaurantIds), eq(deals.status, "active")));
+      .where(and(inArray(deals.restaurantId, restaurantIds), eq(deals.status, "active")))
+      .limit(50);
 
-    const bookmarksPromise = userId
-      ? db
-          .select({ restaurantId: userFavoriteRestaurants.restaurantId })
-          .from(userFavoriteRestaurants)
-          .where(
-            and(
-              eq(userFavoriteRestaurants.userId, userId),
-              inArray(userFavoriteRestaurants.restaurantId, restaurantIds)
+    const dealIds = activeDealsRows.map((d) => d.id);
+
+    // Fetch Cuisines for these deals
+    const dealCuisinesRows =
+      dealIds.length > 0
+        ? await db
+            .select({
+              dealId: dealCuisines.dealId,
+              id: cuisines.id,
+              name: cuisines.name,
+            })
+            .from(dealCuisines)
+            .innerJoin(cuisines, eq(dealCuisines.cuisineId, cuisines.id))
+            .where(inArray(dealCuisines.dealId, dealIds))
+        : [];
+
+    // Fetch Dietary for these deals
+    const dealDietaryRows =
+      dealIds.length > 0
+        ? await db
+            .select({
+              dealId: dealDietaryPreferences.dealId,
+              id: dietaryPreferences.id,
+              name: dietaryPreferences.name,
+            })
+            .from(dealDietaryPreferences)
+            .innerJoin(
+              dietaryPreferences,
+              eq(dealDietaryPreferences.dietaryPreferenceId, dietaryPreferences.id)
             )
-          )
-      : Promise.resolve([]);
+            .where(inArray(dealDietaryPreferences.dealId, dealIds))
+        : [];
 
-    const [activeDealsRows, bookmarks] = await Promise.all([activeDealsPromise, bookmarksPromise]);
-    bookmarkedRestaurantIds = bookmarks.map((bookmark) => bookmark.restaurantId);
+    // Map them
+    const cuisinesMap = new Map<number, { id: number; name: string }[]>();
+    dealCuisinesRows.forEach((r) => {
+      if (!cuisinesMap.has(r.dealId)) cuisinesMap.set(r.dealId, []);
+      cuisinesMap.get(r.dealId)?.push({ id: r.id, name: r.name });
+    });
 
-    const activeDealIds = activeDealsRows.map((dealRow) => dealRow.id);
+    const dietaryMap = new Map<number, { id: number; name: string }[]>();
+    dealDietaryRows.forEach((r) => {
+      if (!dietaryMap.has(r.dealId)) dietaryMap.set(r.dealId, []);
+      dietaryMap.get(r.dealId)?.push({ id: r.id, name: r.name });
+    });
 
-    const cuisinesByDeal = new Map<number, Array<{ id: number; name: string }>>();
-    const dietaryByDeal = new Map<number, Array<{ id: number; name: string }>>();
-
-    if (activeDealIds.length > 0) {
-      const cuisineQuery = db
-        .select({
-          dealId: dealCuisines.dealId,
-          id: cuisines.id,
-          name: cuisines.name,
-        })
-        .from(dealCuisines)
-        .innerJoin(cuisines, eq(dealCuisines.cuisineId, cuisines.id))
-        .where(inArray(dealCuisines.dealId, activeDealIds));
-
-      const dietaryQuery = db
-        .select({
-          dealId: dealDietaryPreferences.dealId,
-          id: dietaryPreferences.id,
-          name: dietaryPreferences.name,
-        })
-        .from(dealDietaryPreferences)
-        .innerJoin(
-          dietaryPreferences,
-          eq(dealDietaryPreferences.dietaryPreferenceId, dietaryPreferences.id)
-        )
-        .where(inArray(dealDietaryPreferences.dealId, activeDealIds));
-
-      const [cuisineRows, dietaryRows] = await Promise.all([cuisineQuery, dietaryQuery]);
-
-      cuisineRows.forEach((row) => {
-        if (!cuisinesByDeal.has(row.dealId)) {
-          cuisinesByDeal.set(row.dealId, []);
-        }
-        cuisinesByDeal.get(row.dealId)!.push({ id: row.id, name: row.name });
-      });
-
-      dietaryRows.forEach((row) => {
-        if (!dietaryByDeal.has(row.dealId)) {
-          dietaryByDeal.set(row.dealId, []);
-        }
-        dietaryByDeal.get(row.dealId)!.push({ id: row.id, name: row.name });
+    for (const d of activeDealsRows) {
+      if (!activeDealsMap.has(d.restaurantId)) activeDealsMap.set(d.restaurantId, []);
+      activeDealsMap.get(d.restaurantId)?.push({
+        id: d.id,
+        title: d.title,
+        description: d.description,
+        cuisines: cuisinesMap.get(d.id) || [],
+        dietaryPreferences: dietaryMap.get(d.id) || [],
       });
     }
 
-    activeDealsRows.forEach((dealRow) => {
-      if (!activeDealsMap.has(dealRow.restaurantId)) {
-        activeDealsMap.set(dealRow.restaurantId, []);
-      }
-      activeDealsMap.get(dealRow.restaurantId)!.push({
-        ...dealRow,
-        cuisines: cuisinesByDeal.get(dealRow.id) ?? [],
-        dietaryPreferences: dietaryByDeal.get(dealRow.id) ?? [],
-      });
-    });
+    // Fetch Bookmarks
+    if (userId) {
+      const bookmarks = await db
+        .select({ id: userFavoriteRestaurants.restaurantId })
+        .from(userFavoriteRestaurants)
+        .where(
+          and(
+            eq(userFavoriteRestaurants.userId, userId),
+            inArray(userFavoriteRestaurants.restaurantId, restaurantIds)
+          )
+        );
+      bookmarks.forEach((b) => bookmarkedIds.add(b.id));
+    }
   }
 
   return {
-    items: restaurantRows.map((row) => ({
-      ...row,
-      activeDeals: activeDealsMap.get(row.id) ?? [],
-      activeDealsCount: activeDealsMap.get(row.id)?.length ?? 0,
-      isBookmarked: bookmarkedRestaurantIds.includes(row.id),
+    items: rows.map((row) => ({
+      ...row.restaurant,
+      partner: { businessName: row.partnerName },
+      distanceKm: row.distance,
+      activeDeals: activeDealsMap.get(row.restaurant.id) || [],
+      activeDealsCount: activeDealsMap.get(row.restaurant.id)?.length || 0,
+      isBookmarked: bookmarkedIds.has(row.restaurant.id),
     })),
     pagination: {
       currentPage: filters.page,
@@ -544,147 +362,128 @@ const getRestaurantSearchResults = async (
   };
 };
 
-const getDealSearchResults = async (
-  filters: SearchFilters,
-  userId?: string
-): Promise<DealSearchResult> => {
-  let filteredDealIds: number[] | null = null;
+const searchDeals = async (filters: SearchFilters, userId?: string) => {
+  const conditions = [eq(deals.status, "active")];
 
-  if (filters.cuisineIds.length > 0) {
-    const cuisineMatches = await db
-      .selectDistinct({ dealId: dealCuisines.dealId })
-      .from(dealCuisines)
-      .where(inArray(dealCuisines.cuisineId, filters.cuisineIds));
-    filteredDealIds = intersectIds(
-      filteredDealIds,
-      cuisineMatches.map((row) => row.dealId)
-    );
-    if (!filteredDealIds || filteredDealIds.length === 0) {
-      return createEmptyResult(filters);
-    }
-  }
-
-  if (filters.dietaryPreferenceIds.length > 0) {
-    const dietaryMatches = await db
-      .selectDistinct({ dealId: dealDietaryPreferences.dealId })
-      .from(dealDietaryPreferences)
-      .where(inArray(dealDietaryPreferences.dietaryPreferenceId, filters.dietaryPreferenceIds));
-    filteredDealIds = intersectIds(
-      filteredDealIds,
-      dietaryMatches.map((row) => row.dealId)
-    );
-    if (!filteredDealIds || filteredDealIds.length === 0) {
-      return createEmptyResult(filters);
-    }
-  }
-
-  const whereConditions: import("drizzle-orm").SQLWrapper[] = [eq(deals.status, "active")];
-
+  // Text Search
   if (filters.query) {
     const term = `%${filters.query}%`;
-    whereConditions.push(
-      sql`(${deals.title} ILIKE ${term} OR COALESCE(${deals.description}, '') ILIKE ${term} OR ${restaurants.name} ILIKE ${term})`
+    conditions.push(
+      or(ilike(deals.title, term), ilike(deals.description, term), ilike(restaurants.name, term))!
     );
   }
 
-  if (filteredDealIds && filteredDealIds.length > 0) {
-    whereConditions.push(inArray(deals.id, filteredDealIds));
+  // Location Filter
+  let distanceCol = sql<number | null>`NULL`;
+  if (filters.latitude !== undefined && filters.longitude !== undefined) {
+    distanceCol = getDistanceSql(
+      filters.latitude,
+      filters.longitude,
+      restaurants.latitude,
+      restaurants.longitude
+    );
+    if (filters.distanceKm) {
+      conditions.push(sql`${distanceCol} <= ${filters.distanceKm}`);
+    }
   }
 
-  const distanceExpr = buildDistanceExpression(
-    restaurants.latitude,
-    restaurants.longitude,
-    filters.latitude,
-    filters.longitude
-  );
-
-  if (distanceExpr && filters.distanceKm !== null) {
-    whereConditions.push(isNotNull(restaurants.latitude));
-    whereConditions.push(isNotNull(restaurants.longitude));
-    whereConditions.push(sql`${distanceExpr} <= ${filters.distanceKm}`);
+  // Cuisine Filter
+  if (filters.cuisineIds.length > 0) {
+    conditions.push(
+      exists(
+        db
+          .select()
+          .from(dealCuisines)
+          .where(
+            and(
+              eq(dealCuisines.dealId, deals.id),
+              inArray(dealCuisines.cuisineId, filters.cuisineIds)
+            )
+          )
+      )
+    );
   }
 
-  const offset = (filters.page - 1) * filters.limit;
-
-  let orderByClause;
-  if (filters.sortBy === "rating") {
-    orderByClause =
-      filters.sortOrder === "asc" ? asc(restaurants.ratingAvg) : desc(restaurants.ratingAvg);
-  } else if (filters.sortBy === "distance" && distanceExpr) {
-    orderByClause = filters.sortOrder === "desc" ? desc(distanceExpr) : asc(distanceExpr);
-  } else {
-    orderByClause = filters.sortOrder === "asc" ? asc(deals.createdAt) : desc(deals.createdAt);
+  // Dietary Filter
+  if (filters.dietaryIds.length > 0) {
+    conditions.push(
+      exists(
+        db
+          .select()
+          .from(dealDietaryPreferences)
+          .where(
+            and(
+              eq(dealDietaryPreferences.dealId, deals.id),
+              inArray(dealDietaryPreferences.dietaryPreferenceId, filters.dietaryIds)
+            )
+          )
+      )
+    );
   }
 
-  const selection = {
-    id: deals.id,
-    title: deals.title,
-    description: deals.description,
-    status: deals.status,
-    startDate: deals.startDate,
-    endDate: deals.endDate,
-    createdAt: deals.createdAt,
-    restaurant: {
-      id: restaurants.id,
-      name: restaurants.name,
-      imageUrl: restaurants.imageUrl,
-      streetAddress: restaurants.streetAddress,
-      city: restaurants.city,
-      province: restaurants.province,
-      latitude: restaurants.latitude,
-      longitude: restaurants.longitude,
-      ratingAvg: restaurants.ratingAvg,
-      ratingCount: restaurants.ratingCount,
-    },
-    partner: {
-      id: partners.id,
-      businessName: partners.businessName,
-    },
-    distanceKm: distanceExpr ?? sql<number | null>`NULL`,
-  };
+  // Sorting
+  let orderBy;
+  switch (filters.sortBy) {
+    case "distance":
+      orderBy = filters.sortOrder === "desc" ? desc(distanceCol) : asc(distanceCol);
+      break;
+    case "newest":
+      orderBy = filters.sortOrder === "asc" ? asc(deals.createdAt) : desc(deals.createdAt);
+      break;
+    default: // relevance or rating (deals don't have rating, use restaurant rating or created at)
+      orderBy = filters.latitude ? asc(distanceCol) : desc(deals.createdAt);
+  }
 
-  const dealQuery = db
-    .select(selection)
+  // Query
+  const baseQuery = db
+    .select({
+      deal: deals,
+      restaurant: restaurants,
+      partnerName: partners.businessName,
+      distance: distanceCol,
+    })
     .from(deals)
     .innerJoin(restaurants, eq(deals.restaurantId, restaurants.id))
     .innerJoin(partners, eq(deals.partnerId, partners.id))
-    .where(and(...whereConditions))
-    .orderBy(orderByClause)
-    .limit(filters.limit)
-    .offset(offset);
+    .where(and(...conditions));
 
-  const dealCountQuery = db
+  const totalCountRes = await db
     .select({ count: sql<number>`count(*)` })
-    .from(deals)
-    .innerJoin(restaurants, eq(deals.restaurantId, restaurants.id))
-    .where(and(...whereConditions));
+    .from(baseQuery.as("subquery"));
 
-  const [dealRows, totalCountResult] = await Promise.all([dealQuery, dealCountQuery]);
-  const totalCount = totalCountResult[0]?.count ?? 0;
-  const totalPages = Math.max(1, Math.ceil(totalCount / filters.limit));
+  const totalCount = Number(totalCountRes[0]?.count || 0);
+  const totalPages = Math.ceil(totalCount / filters.limit);
 
-  const dealIds = dealRows.map((deal) => deal.id);
+  const rows = await baseQuery
+    .orderBy(orderBy)
+    .limit(filters.limit)
+    .offset((filters.page - 1) * filters.limit);
 
-  const cuisinesByDeal = new Map<number, Array<{ id: number; name: string }>>();
-  const dietaryByDeal = new Map<number, Array<{ id: number; name: string }>>();
+  // Hydrate Cuisines, Dietary & Bookmarks
+  const dealIds = rows.map((r) => r.deal.id);
+  const cuisinesMap = new Map<number, { id: number; name: string }[]>();
+  const dietaryMap = new Map<number, { id: number; name: string }[]>();
+  const bookmarkedIds = new Set<number>();
 
-  let bookmarkedDealIds: number[] = [];
   if (dealIds.length > 0) {
-    const cuisineQuery = db
-      .select({
-        dealId: dealCuisines.dealId,
-        cuisineId: cuisines.id,
-        cuisineName: cuisines.name,
-      })
+    // Fetch Cuisines
+    const cRows = await db
+      .select({ dealId: dealCuisines.dealId, id: cuisines.id, name: cuisines.name })
       .from(dealCuisines)
       .innerJoin(cuisines, eq(dealCuisines.cuisineId, cuisines.id))
       .where(inArray(dealCuisines.dealId, dealIds));
 
-    const dietaryQuery = db
+    cRows.forEach((r) => {
+      if (!cuisinesMap.has(r.dealId)) cuisinesMap.set(r.dealId, []);
+      cuisinesMap.get(r.dealId)?.push({ id: r.id, name: r.name });
+    });
+
+    // Fetch Dietary
+    const dRows = await db
       .select({
         dealId: dealDietaryPreferences.dealId,
-        dietaryId: dietaryPreferences.id,
-        dietaryName: dietaryPreferences.name,
+        id: dietaryPreferences.id,
+        name: dietaryPreferences.name,
       })
       .from(dealDietaryPreferences)
       .innerJoin(
@@ -693,44 +492,35 @@ const getDealSearchResults = async (
       )
       .where(inArray(dealDietaryPreferences.dealId, dealIds));
 
-    const favoritesPromise = userId
-      ? db
-          .select({ dealId: userFavoriteDeals.dealId })
-          .from(userFavoriteDeals)
-          .where(
-            and(eq(userFavoriteDeals.userId, userId), inArray(userFavoriteDeals.dealId, dealIds))
-          )
-      : Promise.resolve([]);
-
-    const [cuisineRows, dietaryRows, favorites] = await Promise.all([
-      cuisineQuery,
-      dietaryQuery,
-      favoritesPromise,
-    ]);
-
-    cuisineRows.forEach((row) => {
-      if (!cuisinesByDeal.has(row.dealId)) {
-        cuisinesByDeal.set(row.dealId, []);
-      }
-      cuisinesByDeal.get(row.dealId)!.push({ id: row.cuisineId, name: row.cuisineName });
+    dRows.forEach((r) => {
+      if (!dietaryMap.has(r.dealId)) dietaryMap.set(r.dealId, []);
+      dietaryMap.get(r.dealId)?.push({ id: r.id, name: r.name });
     });
 
-    dietaryRows.forEach((row) => {
-      if (!dietaryByDeal.has(row.dealId)) {
-        dietaryByDeal.set(row.dealId, []);
-      }
-      dietaryByDeal.get(row.dealId)!.push({ id: row.dietaryId, name: row.dietaryName });
-    });
-
-    bookmarkedDealIds = favorites.map((favorite) => favorite.dealId);
+    // Fetch Bookmarks
+    if (userId) {
+      const bookmarks = await db
+        .select({ id: userFavoriteDeals.dealId })
+        .from(userFavoriteDeals)
+        .where(
+          and(eq(userFavoriteDeals.userId, userId), inArray(userFavoriteDeals.dealId, dealIds))
+        );
+      bookmarks.forEach((b) => bookmarkedIds.add(b.id));
+    }
   }
 
   return {
-    items: dealRows.map((deal) => ({
-      ...deal,
-      cuisines: cuisinesByDeal.get(deal.id) ?? [],
-      dietaryPreferences: dietaryByDeal.get(deal.id) ?? [],
-      isBookmarked: bookmarkedDealIds.includes(deal.id),
+    items: rows.map((row) => ({
+      ...row.deal,
+      restaurant: {
+        ...row.restaurant,
+        ratingAvg: row.restaurant.ratingAvg, // Ensure string/number consistency if needed
+      },
+      partner: { id: row.deal.partnerId, businessName: row.partnerName },
+      distanceKm: row.distance,
+      cuisines: cuisinesMap.get(row.deal.id) || [],
+      dietaryPreferences: dietaryMap.get(row.deal.id) || [],
+      isBookmarked: bookmarkedIds.has(row.deal.id),
     })),
     pagination: {
       currentPage: filters.page,
@@ -742,257 +532,111 @@ const getDealSearchResults = async (
   };
 };
 
+// --- Routes ---
+
+// Optional Auth Middleware
+const optionalAuth = async (req: Request, res: Response, next: () => void) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (authHeader?.startsWith("Bearer ")) {
+      const token = authHeader.substring(7);
+      const { verifyToken } = await import("@clerk/backend");
+      const payload = await verifyToken(token, { secretKey: process.env.CLERK_SECRET_KEY! });
+      if (payload.sub) {
+        const user = await db
+          .select()
+          .from(users)
+          .where(eq(users.clerkUserId, payload.sub))
+          .limit(1);
+        if (user[0]) (req as SearchRequest).userId = user[0].id;
+      }
+    }
+  } catch {
+    /* ignore invalid tokens for optional auth */
+  }
+  next();
+};
+
 router.get("/", optionalAuth, async (req: Request, res: Response) => {
-  const rawFilters = parseSearchFilters(req);
+  try {
+    const filters = parseFilters(req);
+    const userId = (req as SearchRequest).userId;
 
-  if ((rawFilters.latitude === null) !== (rawFilters.longitude === null)) {
-    return ResponseHelper.badRequest(
-      res,
-      "Both latitude and longitude are required for location-based search"
-    );
-  }
+    const [restaurantsRes, dealsRes] = await Promise.all([
+      filters.showType !== "deals"
+        ? searchRestaurants(filters, userId)
+        : { items: [], pagination: { totalCount: 0 } },
+      filters.showType !== "restaurants"
+        ? searchDeals(filters, userId)
+        : { items: [], pagination: { totalCount: 0 } },
+    ]);
 
-  if (rawFilters.latitude !== null && (rawFilters.latitude < -90 || rawFilters.latitude > 90)) {
-    return ResponseHelper.badRequest(res, "Latitude must be between -90 and 90");
-  }
-
-  if (
-    rawFilters.longitude !== null &&
-    (rawFilters.longitude < -180 || rawFilters.longitude > 180)
-  ) {
-    return ResponseHelper.badRequest(res, "Longitude must be between -180 and 180");
-  }
-
-  if (rawFilters.distanceKm !== null && rawFilters.latitude === null) {
-    return ResponseHelper.badRequest(
-      res,
-      "Distance filtering requires both latitude and longitude"
-    );
-  }
-
-  const filters = await hydrateSearchFilters(rawFilters);
-  const userId = (req as Request & { userId?: string }).userId;
-
-  const includeRestaurants = filters.showType !== "deals";
-  const includeDeals = filters.showType !== "restaurants";
-
-  const result = await DbHelper.executeWithErrorHandling(
-    async () => {
-      const [restaurantResult, dealResult] = await Promise.all([
-        includeRestaurants
-          ? getRestaurantSearchResults(filters, userId)
-          : Promise.resolve(createEmptyResult(filters)),
-        includeDeals
-          ? getDealSearchResults(filters, userId)
-          : Promise.resolve(createEmptyResult(filters)),
-      ]);
-
-      return {
-        restaurants: restaurantResult.items,
-        deals: dealResult.items,
-        pagination: {
-          restaurants: restaurantResult.pagination,
-          deals: dealResult.pagination,
-        },
-        filtersApplied: {
-          query: filters.query,
-          showType: filters.showType,
-          cuisineIds: filters.cuisineIds,
-          dietaryPreferenceIds: filters.dietaryPreferenceIds,
-          latitude: filters.latitude,
-          longitude: filters.longitude,
-          distanceKm: filters.distanceKm,
-          sortBy: filters.sortBy,
-          sortOrder: filters.sortOrder,
-        },
-      };
-    },
-    res,
-    "Failed to search"
-  );
-
-  if (result) {
-    ResponseHelper.success(res, result);
+    ResponseHelper.success(res, {
+      restaurants: restaurantsRes.items,
+      deals: dealsRes.items,
+      pagination: {
+        restaurants: (restaurantsRes as SearchResult).pagination,
+        deals: (dealsRes as SearchResult).pagination,
+      },
+      filtersApplied: filters,
+    });
+  } catch (error) {
+    console.error("Search error:", error);
+    ResponseHelper.internalError(res, "Search failed");
   }
 });
 
 router.get("/restaurants", optionalAuth, async (req: Request, res: Response) => {
-  const rawFilters = parseSearchFilters(req);
-  rawFilters.showType = "restaurants";
+  try {
+    const filters = parseFilters(req);
+    filters.showType = "restaurants";
+    const userId = (req as SearchRequest).userId;
 
-  if ((rawFilters.latitude === null) !== (rawFilters.longitude === null)) {
-    return ResponseHelper.badRequest(
-      res,
-      "Both latitude and longitude are required for location-based search"
-    );
-  }
-
-  if (rawFilters.latitude !== null && (rawFilters.latitude < -90 || rawFilters.latitude > 90)) {
-    return ResponseHelper.badRequest(res, "Latitude must be between -90 and 90");
-  }
-
-  if (
-    rawFilters.longitude !== null &&
-    (rawFilters.longitude < -180 || rawFilters.longitude > 180)
-  ) {
-    return ResponseHelper.badRequest(res, "Longitude must be between -180 and 180");
-  }
-
-  if (rawFilters.distanceKm !== null && rawFilters.latitude === null) {
-    return ResponseHelper.badRequest(
-      res,
-      "Distance filtering requires both latitude and longitude"
-    );
-  }
-
-  const filters = await hydrateSearchFilters(rawFilters);
-  const userId = (req as Request & { userId?: string }).userId;
-
-  const result = await DbHelper.executeWithErrorHandling(
-    async () => {
-      const restaurantResult = await getRestaurantSearchResults(filters, userId);
-
-      return {
-        restaurants: restaurantResult.items,
-        searchParams: {
-          query: filters.query,
-          cuisineIds: filters.cuisineIds,
-          dietaryPreferenceIds: filters.dietaryPreferenceIds,
-          location:
-            filters.latitude !== null && filters.longitude !== null
-              ? {
-                  latitude: filters.latitude,
-                  longitude: filters.longitude,
-                  radius: filters.distanceKm,
-                }
-              : null,
-          sortBy: filters.sortBy,
-          sortOrder: filters.sortOrder,
-        },
-        pagination: restaurantResult.pagination,
-      };
-    },
-    res,
-    "Failed to search restaurants"
-  );
-
-  if (result) {
-    ResponseHelper.success(res, result);
+    const result = await searchRestaurants(filters, userId);
+    ResponseHelper.success(res, {
+      restaurants: result.items,
+      pagination: result.pagination,
+      searchParams: filters,
+    });
+  } catch (error) {
+    console.error("Restaurant search error:", error);
+    ResponseHelper.internalError(res, "Search failed");
   }
 });
 
-/**
- * GET /search/restaurants/:restaurantId
- * Get detailed information about a specific restaurant
- */
 router.get("/restaurants/:restaurantId", optionalAuth, async (req: Request, res: Response) => {
   const restaurantId = ValidationHelper.parseId(req.params.restaurantId as string);
-  if (restaurantId === null) {
-    return ResponseHelper.badRequest(res, "Invalid restaurant ID");
-  }
+  if (!restaurantId) return ResponseHelper.badRequest(res, "Invalid ID");
 
-  const result = await DbHelper.executeWithErrorHandling(
-    async () => {
-      // Get restaurant details
-      const restaurant = await db
-        .select({
-          id: restaurants.id,
-          name: restaurants.name,
-          imageUrl: restaurants.imageUrl,
-          description: restaurants.description,
-          streetAddress: restaurants.streetAddress,
-          city: restaurants.city,
-          province: restaurants.province,
-          postalCode: restaurants.postalCode,
-          phone: restaurants.phone,
-          ratingAvg: restaurants.ratingAvg,
-          ratingCount: restaurants.ratingCount,
-          latitude: restaurants.latitude,
-          longitude: restaurants.longitude,
-          openingTime: restaurants.openingTime,
-          closingTime: restaurants.closingTime,
-          isActive: restaurants.isActive,
-          createdAt: restaurants.createdAt,
-          partner: {
-            id: partners.id,
-            businessName: partners.businessName,
-          },
-        })
-        .from(restaurants)
-        .innerJoin(partners, eq(restaurants.partnerId, partners.id))
-        .where(and(eq(restaurants.id, restaurantId), eq(restaurants.isActive, true)))
-        .limit(1);
+  try {
+    const restaurantRows = await db
+      .select({
+        restaurant: restaurants,
+        partnerName: partners.businessName,
+      })
+      .from(restaurants)
+      .innerJoin(partners, eq(restaurants.partnerId, partners.id))
+      .where(eq(restaurants.id, restaurantId))
+      .limit(1);
 
-      if (restaurant.length === 0) {
-        throw new Error("Restaurant not found");
-      }
+    if (restaurantRows.length === 0) return ResponseHelper.error(res, "Restaurant not found", 404);
 
-      // Get active deals for this restaurant
-      const activeDeals = await db
-        .select({
-          id: deals.id,
-          title: deals.title,
-          description: deals.description,
-          startDate: deals.startDate,
-          endDate: deals.endDate,
-          createdAt: deals.createdAt,
-        })
-        .from(deals)
-        .where(and(eq(deals.restaurantId, restaurantId), eq(deals.status, "active")))
-        .orderBy(deals.createdAt);
+    const row = restaurantRows[0]!;
+    const restaurant = {
+      ...row.restaurant,
+      partner: { businessName: row.partnerName },
+    };
 
-      // Get bookmark status for authenticated users
-      const userId = (req as Request & { userId?: string }).userId;
-      let isBookmarked = false;
+    const activeDealsRows = await db
+      .select()
+      .from(deals)
+      .where(and(eq(deals.restaurantId, restaurantId), eq(deals.status, "active")))
+      .orderBy(desc(deals.createdAt));
 
-      if (userId) {
-        const bookmark = await db
-          .select()
-          .from(userFavoriteRestaurants)
-          .where(
-            and(
-              eq(userFavoriteRestaurants.userId, userId),
-              eq(userFavoriteRestaurants.restaurantId, restaurantId)
-            )
-          )
-          .limit(1);
-
-        isBookmarked = bookmark.length > 0;
-      }
-
-      return {
-        restaurant: {
-          ...restaurant[0],
-          isBookmarked,
-        },
-        activeDeals,
-      };
-    },
-    res,
-    "Failed to fetch restaurant details"
-  );
-
-  if (result) {
-    ResponseHelper.success(res, result);
-  }
-});
-
-/**
- * GET /search/restaurants/:restaurantId/bookmark-status
- * Check if restaurant is bookmarked by authenticated user
- */
-router.get("/restaurants/:restaurantId/bookmark-status", async (req: Request, res: Response) => {
-  const userId = AuthHelper.requireAuth(req, res);
-  if (!userId) return;
-
-  const restaurantId = ValidationHelper.parseId(req.params.restaurantId as string);
-  if (restaurantId === null) {
-    return ResponseHelper.badRequest(res, "Invalid restaurant ID");
-  }
-
-  const result = await DbHelper.executeWithErrorHandling(
-    async () => {
-      const bookmark = await db
+    const userId = AuthHelper.getOptionalAuth(req as AuthenticatedRequest);
+    let isBookmarked = false;
+    if (userId) {
+      const b = await db
         .select()
         .from(userFavoriteRestaurants)
         .where(
@@ -1000,23 +644,48 @@ router.get("/restaurants/:restaurantId/bookmark-status", async (req: Request, re
             eq(userFavoriteRestaurants.userId, userId),
             eq(userFavoriteRestaurants.restaurantId, restaurantId)
           )
+        );
+      isBookmarked = b.length > 0;
+    }
+
+    ResponseHelper.success(res, {
+      restaurant: { ...restaurant, isBookmarked },
+      activeDeals: activeDealsRows,
+    });
+  } catch (error) {
+    console.error("Restaurant detail error:", error);
+    ResponseHelper.internalError(res, "Failed to fetch details");
+  }
+});
+
+router.get("/restaurants/:restaurantId/bookmark-status", async (req: Request, res: Response) => {
+  const userId = AuthHelper.requireAuth(req, res);
+  if (!userId) return;
+  const restaurantId = ValidationHelper.parseId(req.params.restaurantId as string);
+  if (!restaurantId) return ResponseHelper.badRequest(res, "Invalid ID");
+
+  try {
+    const bookmark = await db
+      .select()
+      .from(userFavoriteRestaurants)
+      .where(
+        and(
+          eq(userFavoriteRestaurants.userId, userId),
+          eq(userFavoriteRestaurants.restaurantId, restaurantId)
         )
-        .limit(1);
+      )
+      .limit(1);
 
-      const bookmarkData = bookmark.length > 0 && bookmark[0] ? bookmark[0] : null;
-      return {
-        restaurantId,
-        isBookmarked: bookmark.length > 0,
-        notifyOnDeal: bookmarkData?.notifyOnDeal ?? false,
-        bookmarkedAt: bookmarkData?.createdAt ?? null,
-      };
-    },
-    res,
-    "Failed to check bookmark status"
-  );
+    const b = bookmark[0];
 
-  if (result) {
-    ResponseHelper.success(res, result);
+    ResponseHelper.success(res, {
+      restaurantId,
+      isBookmarked: !!b,
+      notifyOnDeal: b?.notifyOnDeal ?? false,
+      bookmarkedAt: b?.createdAt ?? null,
+    });
+  } catch {
+    ResponseHelper.internalError(res, "Error checking bookmark");
   }
 });
 
