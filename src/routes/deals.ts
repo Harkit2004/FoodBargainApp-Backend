@@ -365,13 +365,11 @@ const optionalAuth = async (req: AuthenticatedRequest, res: Response, next: () =
       }
     } catch (authError) {
       // Token verification failed, continue without user
-      console.log("Optional auth failed:", authError);
     }
 
     next();
   } catch (error) {
     // Any error in optional auth, continue without user
-    console.log("Optional authentication error:", error);
     next();
   }
 };
@@ -379,7 +377,6 @@ const optionalAuth = async (req: AuthenticatedRequest, res: Response, next: () =
 router.get("/", optionalAuth, async (req: AuthenticatedRequest, res: Response) => {
   // Get userId from authenticated request (will be undefined for unauthenticated users)
   const userId = req.user?.id;
-  console.log("GET /deals - Optional auth userId:", userId);
 
   const page = parseInt(req.query.page as string) || 1;
   const limit = Math.min(parseInt(req.query.limit as string) || 20, 100);

@@ -213,10 +213,6 @@ router.post("/", async (req: AuthenticatedRequest, res: Response) => {
               )
             );
 
-          console.log(
-            `📢 Found ${bookmarkedUsers.length} users to notify about new deal at ${restaurant.name}`
-          );
-
           if (bookmarkedUsers.length === 0) {
             return;
           }
@@ -248,8 +244,6 @@ router.post("/", async (req: AuthenticatedRequest, res: Response) => {
                 message: `${restaurant.name} just added a new deal: "${title}"!`,
               });
 
-              console.log(`✅ Created in-app notification for ${user.email} - Deal: ${title}`);
-
               // Send email if user has email notifications enabled
               const emailEnabled = notificationPrefs?.emailNotifications !== false;
 
@@ -265,13 +259,9 @@ router.post("/", async (req: AuthenticatedRequest, res: Response) => {
                   dealId,
                 });
 
-                if (emailSent) {
-                  console.log(`📧 New deal email sent to ${user.email}`);
-                } else {
+                if (!emailSent) {
                   console.warn(`⚠️  Failed to send email to ${user.email}`);
                 }
-              } else {
-                console.log(`📵 Email notifications disabled for user ${user.displayName}`);
               }
             } catch (error) {
               console.error(
@@ -698,9 +688,6 @@ router.patch("/:dealId/status", async (req: AuthenticatedRequest, res: Response)
         })
         .where(eq(deals.id, dealId))
         .returning();
-
-      // TODO: If deal becomes active, we could trigger notifications here,
-      // but maybe doing that in frontend is better
 
       if (!updatedDeal[0]) {
         throw new Error("Failed to update deal status");
