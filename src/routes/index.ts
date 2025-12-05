@@ -10,6 +10,8 @@ import searchRoutes from "./search.js";
 import userRoutes from "./user.js";
 import dealReportsRoutes from "./deal-reports.js";
 import commentReportsRoutes from "./comment-reports.js";
+import adminRoutes from "./admin.js";
+import disputesRoutes from "./disputes.js";
 
 export {
   authRoutes,
@@ -24,6 +26,8 @@ export {
   userRoutes,
   dealReportsRoutes,
   commentReportsRoutes,
+  adminRoutes,
+  disputesRoutes,
 };
 
 // Default export for convenient importing
@@ -40,4 +44,6 @@ export default {
   user: userRoutes,
   dealReports: dealReportsRoutes,
   commentReports: commentReportsRoutes,
+  admin: adminRoutes,
+  disputes: disputesRoutes,
 };

@@ -35,6 +35,8 @@ export const users = pgTable("users", {
   phone: varchar("phone"),
   location: varchar("location").notNull(),
   isAdmin: boolean("is_admin").default(false).notNull(),
+  isBanned: boolean("is_banned").default(false).notNull(),
+  banReason: text("ban_reason"),
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow(),
 });

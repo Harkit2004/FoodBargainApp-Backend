@@ -12,6 +12,8 @@ export interface AuthenticatedRequest extends Request {
     displayName?: string;
     isPartner?: boolean;
     isAdmin?: boolean;
+    isBanned?: boolean;
+    banReason?: string | null;
   };
 }
 
@@ -23,6 +25,27 @@ export const authenticateUser = async (
   req: AuthenticatedRequest,
   res: Response,
   next: NextFunction
+) => {
+  await authenticateUserInternal(req, res, next, false);
+};
+
+/**
+ * Authentication middleware that allows banned users to proceed
+ * Used for routes like submitting a ban dispute
+ */
+export const authenticateUserAllowBanned = async (
+  req: AuthenticatedRequest,
+  res: Response,
+  next: NextFunction
+) => {
+  await authenticateUserInternal(req, res, next, true);
+};
+
+const authenticateUserInternal = async (
+  req: AuthenticatedRequest,
+  res: Response,
+  next: NextFunction,
+  allowBanned: boolean
 ) => {
   try {
     const authHeader = req.headers.authorization;
@@ -58,6 +81,15 @@ export const authenticateUser = async (
       });
     }
 
+    // Check if user is banned
+    if (dbUser[0]!.isBanned && !allowBanned) {
+      return res.status(403).json({
+        error: "Account banned",
+        isBanned: true,
+        banReason: dbUser[0]!.banReason,
+      });
+    }
+
     // Check if user is a partner
     const partnerCheck = await db
       .select()
@@ -72,6 +104,7 @@ export const authenticateUser = async (
       displayName: dbUser[0]!.displayName || "",
       isPartner: partnerCheck.length > 0,
       isAdmin: dbUser[0]!.isAdmin ?? false,
+      isBanned: dbUser[0]!.isBanned,
     };
 
     next();

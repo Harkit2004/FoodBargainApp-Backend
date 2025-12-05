@@ -192,6 +192,16 @@ router.post("/login", async (req: Request, res: Response) => {
       });
     }
 
+    // Check if user is banned
+    if (user[0]!.isBanned) {
+      return res.status(403).json({
+        success: false,
+        error: "Account banned",
+        isBanned: true,
+        banReason: user[0]!.banReason,
+      });
+    }
+
     // Check if user is a partner
     const partner = await db
       .select()
